@@ -107,6 +107,13 @@ If something comes out wrong, these go in `run.sh` next to the other
 The game's log is `log.txt` in its `data` folder: please add it to a
 report.
 
+Games a kit of Pocket Native 0.4.0 already built need no new build: the
+`pocket-native-*.zip` of this fork's
+[releases](https://github.com/iArti/pocket-native-rocknix-ds/releases)
+holds the `pocket-native` folder without games. Unpack it over the
+`pocket-native` folder inside your `Pocket Native` one, and the games in
+`games` play with it. `scripts/release.sh` makes that zip.
+
 ## Controls
 
 | Handheld | 3DS |

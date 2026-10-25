@@ -191,8 +191,8 @@ impl Default for GameSettings {
 }
 
 /// the engine's speed hacks, each of which a game may not get along with. all
-/// but skip_bottom, frame_skip and shown_only take effect when the game
-/// starts.
+/// but skip_bottom, skip_right_eye, frame_skip and shown_only take effect
+/// when the game starts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Advanced {

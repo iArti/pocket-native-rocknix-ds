@@ -93,7 +93,7 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 31] = [
     ("ROM read-ahead", |a| &mut a.read_ahead, ON_OFF, "Reads the parts of the game it loaded last time ahead. Try Off if loading stalls."),
     ("Shader compiling", |a| &mut a.background_shaders, ["When needed", "Background"], "Background builds new shaders with no pause, a stand-in drawn meanwhile. Try When needed for brief glitches."),
     ("Skip the right eye", |a| &mut a.skip_right_eye, ON_OFF, "Leaves out the right eye's picture, which 2D never shows. Try Off if the top screen flickers or is wrong."),
-    ("Draw only shown frames", |a| &mut a.shown_only, ON_OFF, "Leaves out the frames the frame cap never shows. Eases the GPU in games that draw every frame. Try Off if it stutters."),
+    ("Draw only shown frames", |a| &mut a.shown_only, ON_OFF, "Leaves out the frames the frame cap never shows, easing the GPU. Try Off if it stutters."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -176,9 +176,9 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
-            ("Applies at once", vec![Field::Toggle(0), Field::Toggle(28), Field::FrameSkip]),
+            ("Applies at once", vec![Field::Toggle(0), Field::Toggle(29), Field::Toggle(30), Field::FrameSkip]),
             ("Speed hacks - requires restart", toggles(1..=11)),
-            ("Graphics - requires restart", toggles(12..=22)),
+            ("Graphics - requires restart", [toggles(12..=22), vec![Field::Toggle(28)]].concat()),
             ("CPU - requires restart", toggles(23..=24)),
             ("Loading - requires restart", toggles(25..=27)),
             ("System - requires restart", vec![Field::Language, Field::Region]),
@@ -677,6 +677,17 @@ mod tests {
             })
             .collect();
         assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// every toggle is on the advanced page, once: one added to TOGGLES
+    /// needs a place in a section.
+    #[test]
+    fn every_toggle_has_its_place() {
+        let fields: Vec<Field> = sections(Page::Advanced, &Profile::default()).into_iter().flat_map(|(_, fields)| fields).collect();
+        for index in 0..TOGGLES.len() {
+            let count = fields.iter().filter(|&&field| field == Field::Toggle(index)).count();
+            assert_eq!(count, 1, "{} is in the advanced settings {count} times", TOGGLES[index].0);
+        }
     }
 
     #[test]

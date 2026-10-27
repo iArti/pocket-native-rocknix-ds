@@ -212,7 +212,7 @@ impl System {
         }
         System {
             cpu: Cpu::new(),
-            memory: Memory::new(config.new3ds, app_bytes),
+            memory: Memory::new(config.new3ds, app_bytes).with_linear_base(linear_heap_base(config.new3ds)),
             kernel: Kernel::new(0, memory::MemoryRegion::Application, linear_heap_base(config.new3ds)),
             services,
             gpu: Gpu::new(),
@@ -327,9 +327,10 @@ impl System {
         if self.kernel.reschedule_pending || self.kernel.current_thread.is_none() {
             self.kernel.reschedule_pending = false;
             let tick = self.cpu.cycles;
-            if self.kernel.schedule(&mut self.cpu, tick) {
-                self.apply_wait_result();
-            }
+            self.kernel.schedule(&mut self.cpu, tick);
+            // a thread released here that keeps the core gets its result
+            // too, before it runs on, not over whatever it does next
+            self.apply_wait_result();
         }
 
         if self.kernel.current_thread.is_none() && self.gpu_busy() {
@@ -351,7 +352,7 @@ impl System {
             if self.services.dsp.running {
                 limit = limit.min(self.next_audio_frame);
             }
-            match self.next_wakeup() {
+            match self.kernel.next_event() {
                 Some(tick) if tick > self.cpu.cycles => self.cpu.cycles = tick.min(limit),
                 _ => self.cpu.cycles = limit,
             }
@@ -503,7 +504,23 @@ impl System {
         if !library.has_code(self.cpu.regs[15] | self.cpu.cpsr.thumb as u32) {
             return None;
         }
-        let mut limit = self.next_preempt.min(self.next_frame_boundary).min(self.next_audio_frame);
+        let mut limit = self.next_frame_boundary.min(self.next_audio_frame);
+        // a thread or a timer due wants the scheduler at its tick, a run
+        // that reached it has it look first
+        let event = self.kernel.next_event();
+        if let Some(tick) = event {
+            if tick <= self.cpu.cycles {
+                self.kernel.reschedule_pending = true;
+                return Some(None);
+            }
+            limit = limit.min(tick);
+        }
+        // a stop for the scheduler unwinds every guest call the code is in,
+        // which the host then enters again one at a time. it only changes
+        // anything when another thread can run
+        if self.kernel.others_ready() {
+            limit = limit.min(self.next_preempt);
+        }
         if let Some(deadline) = deadline {
             limit = limit.min(deadline);
         }
@@ -523,6 +540,9 @@ impl System {
             recompiled::Stop::Left => "out of budget or out of its code",
         };
         self.library_left = (self.cpu.regs[15] | self.cpu.cpsr.thumb as u32, why, self.kernel.current_thread);
+        if event.is_some_and(|tick| self.cpu.cycles >= tick) {
+            self.kernel.reschedule_pending = true;
+        }
         if ran == 0 && matches!(stop, recompiled::Stop::Left) {
             return None;
         }
@@ -606,18 +626,6 @@ impl System {
         }
     }
 
-    /// the earliest tick any blocked thread or armed timer wants to wake at.
-    fn next_wakeup(&self) -> Option<u64> {
-        let threads = self.kernel.next_thread_wakeup();
-        let timers = self.kernel.objects.iter().filter_map(|(_, object)| {
-            match object {
-                kernel::object::KObject::Timer(timer) => timer.fire_at,
-                _ => None,
-            }
-        });
-        threads.into_iter().chain(timers).min()
-    }
-
     /// everything that happens between frames, vertical blank, input, clock.
     fn end_frame(&mut self) {
         self.frames += 1;
@@ -631,25 +639,13 @@ impl System {
         let tick = self.cpu.cycles;
         memory::config::update_datetime(self.memory.phys.shared_page_mut(), self.boot_clock, tick);
 
-        // fire the expired timers.
-        let mut signalled = Vec::new();
+        // gather the timers again, without the ones closed since. they fire
+        // when the scheduler gets to their tick
+        self.kernel.timers.clear();
         for (id, object) in self.kernel.objects.iter() {
-            if let kernel::object::KObject::Timer(timer) = object {
-                if timer.fire_at.is_some_and(|at| tick >= at) {
-                    signalled.push(id);
-                }
+            if let kernel::object::KObject::Timer(_) = object {
+                self.kernel.timers.push(id);
             }
-        }
-        for id in signalled {
-            if let Some(kernel::object::KObject::Timer(timer)) = self.kernel.objects.get_mut(id) {
-                timer.signaled = true;
-                timer.fire_at = if timer.interval > 0 {
-                    Some(tick + timer.interval)
-                } else {
-                    None
-                };
-            }
-            self.kernel.reschedule_pending = true;
         }
 
         self.gpu_work(&[], |_, renderer, _| renderer.end_frame());
@@ -673,12 +669,23 @@ impl System {
             services::dsp::advance(self);
             services::dsp::signal_semaphore(self);
         }
+        // the devices that report at a rate a title sets, which this is
+        // fine enough for
+        services::ir_rst::tick(self);
+        services::ir::tick(self);
     }
 
     /// the stereo samples the console played since the last call, at
     /// AUDIO_SAMPLE_RATE.
     pub fn take_audio(&mut self) -> Vec<[i16; 2]> {
+        services::dsp::collect(self);
         std::mem::take(&mut self.services.dsp.output)
+    }
+
+    /// mixes the DSP's frames on a thread of its own from here on, as the
+    /// console's DSP mixes beside its CPU.
+    pub fn enable_async_sound(&mut self) {
+        services::dsp::start_sound_thread(&mut self.services.dsp);
     }
 
     /// what the software keyboard asks for, while a title waits on it.
@@ -717,7 +724,7 @@ impl System {
             log::warn!("no GPU thread, drawing on the CPU's, {error}");
             return;
         }
-        self.gpu_queue = Some(GpuQueue { jobs, pending: Arc::default(), done: Arc::default(), finished: Arc::default(), presents: Arc::default() });
+        self.gpu_queue = Some(GpuQueue { jobs, pending: Arc::default(), done: Arc::default(), finished: Arc::default(), presents: Arc::default(), waiter: Arc::default() });
     }
 
     /// does GPU work, on the GPU thread when there is one, then raises its
@@ -734,7 +741,7 @@ impl System {
         };
         let parts = Shared((&mut self.gpu as *mut Gpu, self.renderer.as_mut() as *mut dyn Renderer, &mut self.memory as *mut Memory));
         let interrupts = interrupts.to_vec();
-        let (pending, done, finished) = (queue.pending.clone(), queue.done.clone(), queue.finished.clone());
+        let (pending, done, finished, waiter) = (queue.pending.clone(), queue.done.clone(), queue.finished.clone(), queue.waiter.clone());
         pending.fetch_add(1, Ordering::AcqRel);
         let work = Shared(work);
         let job = move || {
@@ -751,9 +758,17 @@ impl System {
                 done.lock().unwrap().extend(interrupts);
                 finished.fetch_add(1, Ordering::AcqRel);
             }
-            pending.fetch_sub(1, Ordering::AcqRel);
+            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                waiter.wake();
+            }
         };
         let _ = queue.jobs.send(Box::new(job));
+    }
+
+    /// lets the GPU's threads finish, for the process to end.
+    pub fn stop_gpu(&mut self) {
+        self.gpu_work(&[], |gpu, _, _| gpu.stop_hardware());
+        self.wait_gpu();
     }
 
     /// waits for the GPU thread to finish everything given to it, so the
@@ -762,10 +777,7 @@ impl System {
         let Some(queue) = &self.gpu_queue else { return };
         if queue.pending.load(Ordering::Acquire) > 0 {
             let start = std::time::Instant::now();
-            let mut tries = 0;
-            while queue.pending.load(Ordering::Acquire) > 0 {
-                pause(&mut tries);
-            }
+            queue.waiter.wait(|| queue.pending.load(Ordering::SeqCst) == 0);
             GPU_WAITED.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
         self.gpu_interrupts();
@@ -1036,13 +1048,10 @@ impl System {
         let layout = Some((areas, cursor, black, smooth, drawn_over));
         let forced = self.panel.0 != layout || self.panel.1 >= 5;
         self.panel = (layout, if forced { 0 } else { self.panel.1 + 1 });
-        let presents = self.gpu_queue.as_ref().map(|queue| queue.presents.clone());
+        let presents = self.gpu_queue.as_ref().map(|queue| (queue.presents.clone(), queue.waiter.clone()));
         let frame = self.frames;
-        if let Some(presents) = &presents {
-            let mut tries = 0;
-            while presents.load(Ordering::Acquire) > 0 {
-                pause(&mut tries);
-            }
+        if let Some((presents, waiter)) = &presents {
+            waiter.wait(|| presents.load(Ordering::SeqCst) == 0);
             presents.fetch_add(1, Ordering::AcqRel);
         }
         self.gpu_work(&[], move |gpu, _, guest| {
@@ -1051,8 +1060,10 @@ impl System {
             let new = gpu.presented != state;
             let again = interpolate && std::mem::replace(&mut gpu.presented_new, new);
             if !forced && !new && !again {
-                if let Some(presents) = presents {
-                    presents.fetch_sub(1, Ordering::AcqRel);
+                if let Some((presents, waiter)) = presents {
+                    if presents.fetch_sub(1, Ordering::SeqCst) == 1 {
+                        waiter.wake();
+                    }
                 }
                 return;
             }
@@ -1069,8 +1080,10 @@ impl System {
                 shown[index] = Some((image, area));
             }
             gpu.present_panel(shown, cursor, overlays, smooth, interpolate, frames);
-            if let Some(presents) = presents {
-                presents.fetch_sub(1, Ordering::AcqRel);
+            if let Some((presents, waiter)) = presents {
+                if presents.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    waiter.wake();
+                }
             }
         });
     }
@@ -1279,14 +1292,39 @@ fn screen_pixels(gpu: &mut Gpu, guest: &mut GuestMemory, screen: zakuro_common::
     out
 }
 
-/// a wait for the GPU thread, which yields a while and then sleeps, so a
-/// long one does not keep a core busy, and hot, for nothing.
-fn pause(tries: &mut u32) {
-    *tries += 1;
-    if *tries < 64 {
-        std::thread::yield_now();
-    } else {
-        std::thread::sleep(std::time::Duration::from_micros(100));
+/// the title's thread waiting on the GPU thread, as the console's CPU waits
+/// for the GPU's interrupt: it gives way a few times, most waits are short,
+/// then sleeps until the GPU thread wakes it as it finishes, rather than
+/// waking to look every so often and keeping a core busy, and hot.
+#[derive(Default)]
+struct Waiter {
+    thread: std::sync::Mutex<Option<std::thread::Thread>>,
+    asleep: std::sync::atomic::AtomicBool,
+}
+
+impl Waiter {
+    fn wait(&self, done: impl Fn() -> bool) {
+        for _ in 0..16 {
+            if done() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        *self.thread.lock().unwrap() = Some(std::thread::current());
+        self.asleep.store(true, Ordering::SeqCst);
+        while !done() {
+            // a wake can't be missed, the timeout is there all the same
+            std::thread::park_timeout(std::time::Duration::from_millis(2));
+        }
+        self.asleep.store(false, Ordering::SeqCst);
+    }
+
+    fn wake(&self) {
+        if self.asleep.load(Ordering::SeqCst) {
+            if let Some(thread) = self.thread.lock().unwrap().as_ref() {
+                thread.unpark();
+            }
+        }
     }
 }
 
@@ -1323,6 +1361,7 @@ struct GpuQueue {
     done: Arc<std::sync::Mutex<Vec<services::gsp::InterruptId>>>,
     finished: Arc<AtomicUsize>,
     presents: Arc<AtomicUsize>,
+    waiter: Arc<Waiter>,
 }
 
 /// what the GPU thread works on, handed over while the queue holds it.
@@ -1418,6 +1457,246 @@ mod tests {
         waiter_gets_it(&mut system, threads);
     }
 
+    /// one thread at the entry create_thread gives, its code a branch to
+    /// itself, current and running.
+    fn one_spinning_thread(system: &mut System) -> ThreadId {
+        use memory::{MemoryState, Permission};
+        let block = system.memory.phys.allocate(memory::MemoryRegion::Application, 0x1000).unwrap();
+        system.memory.map(0x0010_0000, block.addr, 0x1000, Permission::RW | Permission::EXECUTE, MemoryState::Code);
+        system.memory.write32(0x0010_0000, 0xEAFF_FFFE);
+        let id = system.kernel.create_thread("main", 0x0010_0000, 0x1000_0000, 0, 0x30, 0);
+        system.map_tls_page(id);
+        system.kernel.schedule(&mut system.cpu, 0);
+        assert_eq!(system.kernel.current_thread, Some(id));
+        id
+    }
+
+    /// waits on a handle for good, as svcWaitSynchronization1.
+    fn wait_on(system: &mut System, handle: u32) {
+        system.cpu.regs[0] = handle;
+        system.cpu.regs[2] = u32::MAX;
+        system.cpu.regs[3] = u32::MAX;
+        kernel::svc::dispatch(system, 0x24);
+    }
+
+    /// steps until the thread runs again, the tick it does.
+    fn runs_again(system: &mut System, id: ThreadId) -> u64 {
+        for _ in 0..1000 {
+            if system.kernel.current_thread == Some(id) && system.kernel.thread(id).status == ThreadStatus::Running {
+                return system.cpu.cycles;
+            }
+            system.step(None);
+        }
+        panic!("the thread never ran again");
+    }
+
+    /// a wait the very next schedule ends, on a thread that keeps the core
+    /// as nothing else can run, returns its result before the thread goes
+    /// on, rather than the handle it was given, written over later.
+    #[test]
+    fn a_wait_the_next_schedule_ends_returns_its_result() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        system.cpu.regs[1] = 0;
+        kernel::svc::dispatch(&mut system, 0x17);
+        let event = system.cpu.regs[1];
+        wait_on(&mut system, event);
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::WaitSync);
+        let object = system.kernel.resolve(event).unwrap();
+        system.kernel.signal_event(object);
+        system.step(None);
+        assert_eq!(system.kernel.current_thread, Some(id));
+        assert_eq!(system.cpu.regs[0], 0, "the wait's result, not the handle");
+    }
+
+    /// a timer fires at its tick, not at the next frame, and the thread on
+    /// it wakes then. a pulse timer is gone once it woke a waiter, and comes
+    /// again a period after it was due.
+    #[test]
+    fn a_timer_fires_at_its_tick() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        // a pulse timer, due in a millisecond and every millisecond after
+        system.cpu.regs[1] = 2;
+        kernel::svc::dispatch(&mut system, 0x1A);
+        let timer = system.cpu.regs[1];
+        system.cpu.regs[0] = timer;
+        system.cpu.regs[2] = 1_000_000;
+        system.cpu.regs[3] = 0;
+        system.cpu.regs[1] = 1_000_000;
+        system.cpu.regs[4] = 0;
+        kernel::svc::dispatch(&mut system, 0x1B);
+        let period = kernel::thread::nanos_to_ticks(1_000_000);
+
+        wait_on(&mut system, timer);
+        let woke = runs_again(&mut system, id);
+        assert!((period..period + PREEMPT_INTERVAL).contains(&woke), "woke at {woke}, due at {period}");
+        assert_eq!(system.cpu.regs[0], 0);
+
+        wait_on(&mut system, timer);
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::WaitSync, "the pulse is gone");
+        let woke = runs_again(&mut system, id);
+        assert!((2 * period..2 * period + PREEMPT_INTERVAL).contains(&woke), "woke at {woke}, due at {}", 2 * period);
+    }
+
+    /// a pulse timer due in a millisecond and every millisecond after.
+    fn pulse_timer(system: &mut System) -> u32 {
+        system.cpu.regs[1] = 2;
+        kernel::svc::dispatch(system, 0x1A);
+        let timer = system.cpu.regs[1];
+        system.cpu.regs[0] = timer;
+        system.cpu.regs[2] = 1_000_000;
+        system.cpu.regs[3] = 0;
+        system.cpu.regs[1] = 1_000_000;
+        system.cpu.regs[4] = 0;
+        kernel::svc::dispatch(system, 0x1B);
+        timer
+    }
+
+    /// a pulse timer releases every thread waiting on it when it fires, not
+    /// only the first, and a fire nothing waits for is lost.
+    #[test]
+    fn a_pulse_timer_wakes_every_waiter_then_clears() {
+        let mut system = System::new(Config::default());
+        let first = one_spinning_thread(&mut system);
+        let second = system.kernel.create_thread("second", 0x0010_0000, 0x0FF0_0000, 0, 0x30, 0);
+        system.map_tls_page(second);
+        let timer = pulse_timer(&mut system);
+        let period = kernel::thread::nanos_to_ticks(1_000_000);
+        for id in [first, second] {
+            system.kernel.current_thread = Some(id);
+            system.kernel.thread_mut(id).status = ThreadStatus::Running;
+            wait_on(&mut system, timer);
+            assert_eq!(system.kernel.thread(id).status, ThreadStatus::WaitSync);
+        }
+        system.kernel.current_thread = None;
+        while system.cpu.cycles < period {
+            system.step(None);
+        }
+        system.step(None);
+        for id in [first, second] {
+            assert_ne!(system.kernel.thread(id).status, ThreadStatus::WaitSync, "thread {id} woke");
+        }
+
+        // the next fire comes with nothing waiting, and is gone after
+        system.cpu.cycles = 2 * period + 10;
+        system.kernel.current_thread = Some(first);
+        system.kernel.thread_mut(first).status = ThreadStatus::Running;
+        wait_on(&mut system, timer);
+        assert_eq!(system.kernel.thread(first).status, ThreadStatus::WaitSync, "the fire nothing waited for is lost");
+    }
+
+    /// cancelling a timer that came due before the scheduler looked keeps
+    /// its fire, as the console's had already happened.
+    #[test]
+    fn cancelling_a_timer_due_keeps_its_fire() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        system.cpu.regs[1] = 0;
+        kernel::svc::dispatch(&mut system, 0x1A);
+        let timer = system.cpu.regs[1];
+        system.cpu.regs[0] = timer;
+        system.cpu.regs[2] = 1_000_000;
+        system.cpu.regs[3] = 0;
+        system.cpu.regs[1] = 0;
+        system.cpu.regs[4] = 0;
+        kernel::svc::dispatch(&mut system, 0x1B);
+        let other = system.kernel.create_thread("other", 0x0010_0000, 0x0FF0_0000, 0, 0x30, 0);
+        system.map_tls_page(other);
+        wait_on(&mut system, timer);
+        // the other thread cancels it after it came due
+        system.cpu.cycles = kernel::thread::nanos_to_ticks(1_000_000) + 100;
+        system.kernel.current_thread = Some(other);
+        system.kernel.thread_mut(other).status = ThreadStatus::Running;
+        system.cpu.regs[0] = timer;
+        kernel::svc::dispatch(&mut system, 0x1C);
+        let tick = system.cpu.cycles;
+        system.kernel.schedule(&mut system.cpu, tick);
+        assert_ne!(system.kernel.thread(id).status, ThreadStatus::WaitSync, "the waiter woke");
+    }
+
+    /// a handle closed while a thread waits on its object neither wakes the
+    /// thread as if it was signalled nor gives the object's place to the
+    /// next one made, and the object goes once the wait is over.
+    #[test]
+    fn closing_what_a_thread_waits_on_keeps_it_waiting() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        system.cpu.regs[1] = 0;
+        kernel::svc::dispatch(&mut system, 0x17);
+        let event = system.cpu.regs[1];
+        let object = system.kernel.resolve(event).unwrap();
+        // for a millisecond
+        system.cpu.regs[0] = event;
+        system.cpu.regs[2] = 1_000_000;
+        system.cpu.regs[3] = 0;
+        kernel::svc::dispatch(&mut system, 0x24);
+        let other = system.kernel.create_thread("other", 0x0010_0000, 0x0FF0_0000, 0, 0x30, 0);
+        system.map_tls_page(other);
+        system.kernel.current_thread = Some(other);
+        system.kernel.thread_mut(other).status = ThreadStatus::Running;
+        system.cpu.regs[0] = event;
+        kernel::svc::dispatch(&mut system, 0x23);
+        let tick = system.cpu.cycles;
+        system.kernel.schedule(&mut system.cpu, tick);
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::WaitSync, "not woken as if signalled");
+        system.cpu.regs[1] = 0;
+        kernel::svc::dispatch(&mut system, 0x17);
+        assert_ne!(system.kernel.resolve(system.cpu.regs[1]), Some(object));
+
+        let late = kernel::thread::nanos_to_ticks(1_000_000) + 1;
+        system.kernel.schedule(&mut system.cpu, late);
+        assert!(matches!(system.kernel.thread(id).wait_result, Some(kernel::thread::WaitResult::TimedOut)));
+        assert!(system.kernel.objects.get(object).is_none(), "gone after the wait");
+    }
+
+    /// a pulse event wakes what waits on it when signalled and is gone
+    /// after, the next wait on it waits.
+    #[test]
+    fn a_pulse_event_does_not_stay_signalled() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        system.cpu.regs[1] = 2;
+        kernel::svc::dispatch(&mut system, 0x17);
+        let event = system.cpu.regs[1];
+        wait_on(&mut system, event);
+        let object = system.kernel.resolve(event).unwrap();
+        system.kernel.signal_event(object);
+        runs_again(&mut system, id);
+        wait_on(&mut system, event);
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::WaitSync);
+    }
+
+    /// an arbiter wait's timeout takes r5 as its high word, -1 waits for
+    /// good.
+    #[test]
+    fn an_arbiter_timeout_is_64_bits() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        kernel::svc::dispatch(&mut system, 0x21);
+        let arbiter = system.cpu.regs[1];
+        let address = system.kernel.thread(id).tls + 0x100;
+        system.memory.write32(address, 0);
+        for (low, high, wakes) in [(u32::MAX, u32::MAX, false), (0x2A05_F200, 1, true)] {
+            system.kernel.thread_mut(id).status = ThreadStatus::Running;
+            system.cpu.regs[0] = arbiter;
+            system.cpu.regs[1] = address;
+            // wait if less than, with a timeout
+            system.cpu.regs[2] = 3;
+            system.cpu.regs[3] = 1;
+            system.cpu.regs[4] = low;
+            system.cpu.regs[5] = high;
+            kernel::svc::dispatch(&mut system, 0x22);
+            let wakeup = system.kernel.thread(id).wakeup_at;
+            assert_eq!(wakeup.is_some(), wakes);
+            if wakes {
+                // five seconds
+                let five = kernel::thread::nanos_to_ticks(5_000_000_000);
+                assert!(wakeup.unwrap() >= five, "{wakeup:?}");
+            }
+        }
+    }
+
     /// a thread whose timed arbiter wait ran out, and that then ended, left
     /// its entry on the arbiter. a signal for one waiter on the address
     /// passes over it to the thread really waiting there, and the dead one
@@ -1462,6 +1741,52 @@ mod tests {
         arbitrate(&mut system, signaller, 0);
         assert_eq!(system.kernel.thread(ended).status, ThreadStatus::Dead);
         assert_eq!(system.kernel.thread(parked).status, ThreadStatus::Ready);
+    }
+
+    /// a signal for one waiter wakes the highest priority one even when a
+    /// lower one waited first, as the console does, and a signal that
+    /// wakes nobody costs a low priority thread time.
+    #[test]
+    fn an_arbiter_signal_wakes_the_highest_priority_first() {
+        let mut system = System::new(Config::default());
+        let low = system.kernel.create_thread("low", 0x0010_0000, 0x1000_0000, 0, 0x30, 0);
+        let high = system.kernel.create_thread("high", 0x0010_0000, 0x0FF0_0000, 0, 0x20, 0);
+        let signaller = system.kernel.create_thread("signaller", 0x0010_0000, 0x0FE0_0000, 0, 0x3F, 0);
+        for id in [low, high, signaller] {
+            system.map_tls_page(id);
+        }
+        system.kernel.schedule(&mut system.cpu, 0);
+        kernel::svc::dispatch(&mut system, 0x21);
+        let arbiter = system.cpu.regs[1];
+        let address = system.kernel.thread(low).tls + 0x100;
+        system.memory.write32(address, 0);
+        let arbitrate = |system: &mut System, who: ThreadId, kind: u32| {
+            system.kernel.current_thread = Some(who);
+            system.kernel.thread_mut(who).status = ThreadStatus::Running;
+            system.cpu.regs[..4].copy_from_slice(&[arbiter, address, kind, 1]);
+            kernel::svc::dispatch(system, 0x22);
+        };
+        arbitrate(&mut system, low, 1);
+        arbitrate(&mut system, high, 1);
+        arbitrate(&mut system, signaller, 0);
+        assert_eq!(system.kernel.thread(high).status, ThreadStatus::Ready);
+        assert_eq!(system.kernel.thread(low).status, ThreadStatus::WaitArbiter);
+        arbitrate(&mut system, signaller, 0);
+        assert_eq!(system.kernel.thread(low).status, ThreadStatus::Ready);
+        let before = system.cpu.cycles;
+        arbitrate(&mut system, signaller, 0);
+        assert_eq!(system.cpu.cycles - before, 1614);
+    }
+
+    /// a negative sleep returns at once, it must not sleep for good.
+    #[test]
+    fn a_negative_sleep_returns_at_once() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        system.cpu.regs[0] = u32::MAX;
+        system.cpu.regs[1] = u32::MAX;
+        kernel::svc::dispatch(&mut system, 0x0A);
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::Running);
     }
 
     #[test]

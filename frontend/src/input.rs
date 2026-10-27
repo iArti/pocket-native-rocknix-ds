@@ -425,6 +425,7 @@ pub fn parse_keys(spec: &str) -> Vec<(u64, HashSet<u16>)> {
         "L2" => Some(L2),
         "R2" => Some(R2),
         "L3" => Some(L3),
+        "R3" => Some(R3),
         "SELECT" => Some(SELECT),
         "START" => Some(START),
         "FN" => Some(FN),

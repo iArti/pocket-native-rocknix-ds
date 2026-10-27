@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::font::{rgba, Canvas};
 use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, Rotation, Settings, Speed, Stick, Stretch};
+use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -40,6 +40,7 @@ enum Field {
     Buttons,
     LeftStick,
     Dpad,
+    RightStick,
     ReverseTiltX,
     ReverseTiltY,
     TouchControls,
@@ -94,7 +95,7 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 31] = [
     ("ROM read-ahead", |a| &mut a.read_ahead, ON_OFF, "Reads the parts of the game it loaded last time ahead. Try Off if loading stalls."),
     ("Shader compiling", |a| &mut a.background_shaders, ["When needed", "Background"], "Background builds new shaders with no pause, a stand-in drawn meanwhile. Try When needed for brief glitches."),
     ("Skip the right eye", |a| &mut a.skip_right_eye, ON_OFF, "Leaves out the right eye's picture, which 2D never shows. Try Off if the top screen flickers or is wrong."),
-    ("Draw only shown frames", |a| &mut a.shown_only, ON_OFF, "Leaves out the frames the frame cap never shows. Eases the GPU in games that draw every frame. Try Off if it stutters."),
+    ("Draw only shown frames", |a| &mut a.shown_only, ON_OFF, "Leaves out the frames the frame cap never shows, easing the GPU. Try Off if it stutters."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -173,13 +174,13 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation])),
             ("Performance", only(vec![Field::FrameCap, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", only(vec![Field::TouchSpeed, Field::Cursor, Field::Buttons, Field::LeftStick, Field::Dpad, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
+            ("Controls", only(vec![Field::TouchSpeed, Field::Cursor, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
-            ("Applies at once", vec![Field::Toggle(0), Field::Toggle(28), Field::FrameSkip]),
+            ("Applies at once", vec![Field::Toggle(0), Field::Toggle(29), Field::Toggle(30), Field::FrameSkip]),
             ("Speed hacks - requires restart", toggles(1..=11)),
-            ("Graphics - requires restart", toggles(12..=22)),
+            ("Graphics - requires restart", [toggles(12..=22), vec![Field::Toggle(28)]].concat()),
             ("CPU - requires restart", toggles(23..=24)),
             ("Loading - requires restart", toggles(25..=27)),
             ("System - requires restart", vec![Field::Language, Field::Region]),
@@ -259,6 +260,7 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
             };
             ("D-pad", dpad.into())
         }
+        Field::RightStick => ("Right stick", if settings.right_stick == RightStick::CStick { "C-stick" } else { "Touch cursor" }.into()),
         Field::ReverseTiltX => ("Reverse tilt X", if settings.reverse_tilt_x { "On" } else { "Off" }.into()),
         Field::ReverseTiltY => ("Reverse tilt Y", if settings.reverse_tilt_y { "On" } else { "Off" }.into()),
         Field::TouchControls => ("Touch controls", if settings.touch_controls { "On" } else { "Off" }.into()),
@@ -317,6 +319,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::Buttons => settings.buttons = step(&[Buttons::Nintendo, Buttons::Xbox], settings.buttons, by),
         Field::LeftStick => settings.left_stick = step(&[Stick::CirclePad, Stick::Dpad], settings.left_stick, by),
         Field::Dpad => settings.dpad = step(&[Dpad::Dpad, Dpad::CirclePad, Dpad::Touch], settings.dpad, by),
+        Field::RightStick => settings.right_stick = step(&[RightStick::Cursor, RightStick::CStick], settings.right_stick, by),
         Field::ReverseTiltX => settings.reverse_tilt_x = !settings.reverse_tilt_x,
         Field::ReverseTiltY => settings.reverse_tilt_y = !settings.reverse_tilt_y,
         Field::TouchControls => settings.touch_controls = !settings.touch_controls,
@@ -359,6 +362,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::Buttons => "Which face buttons are A and B: where Nintendo puts them, or where Xbox does.",
         Field::LeftStick => "The left stick as the circle pad, or as the d-pad.",
         Field::Dpad => "The d-pad as itself, the circle pad or the touch cursor. FN or L3 with Select switches it in game.",
+        Field::RightStick => "The touch cursor, or the C-stick with L2 and R2 as ZL and ZR for New 3DS games. R3 switches it in game.",
         Field::ReverseTiltX => "Holding L2, the right stick tilts the console. On tilts it the other way left and right.",
         Field::ReverseTiltY => "Holding L2, the right stick tilts the console. On tilts it the other way up and down.",
         Field::TouchControls => "Buttons and a circle pad on the touch screen. They hide while a gamepad is used.",
@@ -682,6 +686,17 @@ mod tests {
             })
             .collect();
         assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// every toggle is on the advanced page, once: one added to TOGGLES
+    /// needs a place in a section.
+    #[test]
+    fn every_toggle_has_its_place() {
+        let fields: Vec<Field> = sections(Page::Advanced, &Profile::default()).into_iter().flat_map(|(_, fields)| fields).collect();
+        for index in 0..TOGGLES.len() {
+            let count = fields.iter().filter(|&&field| field == Field::Toggle(index)).count();
+            assert_eq!(count, 1, "{} is in the advanced settings {count} times", TOGGLES[index].0);
+        }
     }
 
     #[test]

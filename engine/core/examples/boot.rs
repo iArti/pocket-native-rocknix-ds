@@ -16,6 +16,8 @@ fn main() {
     let frames: u64 = args.next().and_then(|a| a.parse().ok()).unwrap_or(60);
 
     let config = Config {
+        // ZAKURO_NEW3DS=1 runs the title on a New 3DS.
+        new3ds: std::env::var("ZAKURO_NEW3DS").is_ok_and(|v| v == "1"),
         language: std::env::var("ZAKURO_LANGUAGE")
             .ok()
             .and_then(|v| v.parse().ok())

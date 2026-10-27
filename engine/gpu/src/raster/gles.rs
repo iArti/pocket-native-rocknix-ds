@@ -3896,6 +3896,10 @@ impl Gles {
             let shades = !crate::switch("ZAKURO_CPU_SHADERS", "vertices shaded on the CPU") && gl.get_parameter_i32(glow::MAX_VERTEX_ATTRIBS) >= 16;
             let storage_align = gl.get_parameter_i32(glow::SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT).max(16) as usize;
             let tables = Ring::new(&gl, glow::SHADER_STORAGE_BUFFER, 8 << 20, storage_align)?;
+            // the generic programs check the fog at run time and so read the
+            // tables whatever the draw, which Panfrost faults on with nothing
+            // bound there: the ring's start stands in until a draw's go up
+            gl.bind_buffer_range(glow::SHADER_STORAGE_BUFFER, 4, Some(tables.buffer), 0, TABLES_SIZE as i32);
             let blank = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(blank));
             gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, 1, 1);

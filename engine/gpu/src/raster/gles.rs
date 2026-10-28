@@ -1800,7 +1800,10 @@ fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Progra
             gl.shader_source(shader, source);
             gl.compile_shader(shader);
             if !gl.get_shader_compile_status(shader) {
-                return Err(format!("could not compile a shader, {}", gl.get_shader_info_log(shader)));
+                let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
+                shaders.into_iter().chain([shader]).for_each(|shader| gl.delete_shader(shader));
+                gl.delete_program(program);
+                return Err(error);
             }
             gl.attach_shader(program, shader);
             shaders.push(shader);
@@ -1811,7 +1814,9 @@ fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Progra
             gl.delete_shader(shader);
         }
         if !gl.get_program_link_status(program) {
-            return Err(format!("could not link a program, {}", gl.get_program_info_log(program)));
+            let error = format!("could not link a program, {}", gl.get_program_info_log(program));
+            gl.delete_program(program);
+            return Err(error);
         }
         Ok(program)
     }
@@ -3544,7 +3549,10 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
                 gl.shader_source(shader, source);
                 gl.compile_shader(shader);
                 if !gl.get_shader_compile_status(shader) {
-                    return Err(format!("could not compile a shader, {}", gl.get_shader_info_log(shader)));
+                    let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
+                    shaders.into_iter().chain([shader]).for_each(|shader| gl.delete_shader(shader));
+                    gl.delete_program(program);
+                    return Err(error);
                 }
                 gl.attach_shader(program, shader);
                 shaders.push(shader);
@@ -3556,7 +3564,9 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
                 gl.delete_shader(shader);
             }
             if !gl.get_program_link_status(program) {
-                return Err(format!("could not link a program, {}", gl.get_program_info_log(program)));
+                let error = format!("could not link a program, {}", gl.get_program_info_log(program));
+                gl.delete_program(program);
+                return Err(error);
             }
             if let (Some(path), Some(binary)) = (cached, gl.get_program_binary(program)) {
                 let mut bytes = binary.format.to_le_bytes().to_vec();
@@ -4984,14 +4994,19 @@ impl Gles {
             gl.shader_source(shader, source);
             gl.compile_shader(shader);
             if !gl.get_shader_compile_status(shader) {
-                return Err(format!("could not compile a compute shader, {}", gl.get_shader_info_log(shader)));
+                let error = format!("could not compile a compute shader, {}", gl.get_shader_info_log(shader));
+                gl.delete_shader(shader);
+                gl.delete_program(program);
+                return Err(error);
             }
             gl.attach_shader(program, shader);
             gl.link_program(program);
             gl.detach_shader(program, shader);
             gl.delete_shader(shader);
             if !gl.get_program_link_status(program) {
-                return Err(format!("could not link a compute program, {}", gl.get_program_info_log(program)));
+                let error = format!("could not link a compute program, {}", gl.get_program_info_log(program));
+                gl.delete_program(program);
+                return Err(error);
             }
             Ok(program)
         }

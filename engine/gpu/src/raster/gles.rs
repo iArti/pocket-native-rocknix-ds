@@ -4270,15 +4270,17 @@ impl Gles {
     /// tiles no drawing holds, which come from memory at the console's size.
     /// the copy takes the drawings' tiles over a run at a time on the GPU
     /// rather than reading them back. RGBA8 alone, which a blit leaves as it
-    /// is.
-    fn retiled_sources(&self, texture: &DrawnTexture) -> Option<Vec<(Option<usize>, i64, i64, i64)>> {
+    /// is. drawings of other kinds inside the rows from memory, as Smash's
+    /// small buffers below the picture it reads as 512x512, are written
+    /// back first, those alone.
+    fn retiled_sources(&self, texture: &DrawnTexture) -> Option<(Vec<(Option<usize>, i64, i64, i64)>, Vec<usize>)> {
         let kind = Kind::Color(ColorFormat::Rgba8);
         if texture.format != ColorFormat::Rgba8 || texture.width % 8 != 0 || texture.height % 8 != 0 {
             return None;
         }
         let (tile, len) = ((64 * kind.bytes()) as i64, texture.width * texture.height * kind.bytes());
         let (across, tiles) = ((texture.width / 8) as i64, (texture.width / 8 * texture.height / 8) as i64);
-        let mut pieces = Vec::new();
+        let (mut pieces, mut apart) = (Vec::new(), Vec::new());
         for (index, s) in self.surfaces.iter().enumerate().filter(|(_, s)| s.dirty_overlaps(texture.addr, len)) {
             // its dirty rows are what it drew, though others took rows of it
             let (first, last) = s.dirty?;
@@ -4297,7 +4299,8 @@ impl Gles {
                 && to % run == 0
                 && (from - offset / tile) % run == 0;
             if !fits {
-                return None;
+                apart.push(index);
+                continue;
             }
             pieces.push((Some(index), offset / tile, from, to));
         }
@@ -4323,7 +4326,12 @@ impl Gles {
                 whole.push(piece);
             }
         }
-        Some(whole)
+        let start = texture.addr as i64;
+        let inside_memory = |s: &Surface| {
+            let (from, to) = ((s.addr as i64 - start).max(0) / tile, ((s.addr as i64 + s.size() as i64 - start).min(len as i64) + tile - 1) / tile);
+            whole.iter().any(|piece| piece.0.is_none() && piece.2 <= from && to <= piece.3)
+        };
+        apart.iter().all(|&index| inside_memory(&self.surfaces[index])).then_some((whole, apart))
     }
 
     /// the surface a drawn texture is the whole of, as it is, which a draw
@@ -4467,7 +4475,8 @@ impl Gles {
 
     fn copy_texture<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture) -> Result<glow::Texture, String> {
         if !self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some()) {
-            if let Some(pieces) = self.retiled_sources(texture) {
+            if let Some((pieces, apart)) = self.retiled_sources(texture) {
+                self.write_back(memory, apart)?;
                 return self.copy_retiled(memory, texture, pieces);
             }
         }
@@ -7037,10 +7046,13 @@ mod tests {
             let index = gles.surface_rows(&mut memory, addr, (w, h), Kind::Color(format), true, None).unwrap();
             gles.surfaces[index].drew((0, h));
         }
-        // and on past them into rows nothing drew, from memory
-        for (height, pieces) in [(96, 2), (128, 3)] {
+        // and on past them into rows nothing drew, from memory, a small
+        // drawing of another kind there written back first, as Smash's
+        let small = gles.surface_rows(&mut memory, top + 256 * 112 * 4, (64, 16), Kind::Color(ColorFormat::Rgb5A1), true, None).unwrap();
+        gles.surfaces[small].drew((0, 16));
+        for (height, pieces, apart) in [(96, 2, 0), (128, 3, 1)] {
             let texture = DrawnTexture { addr: top, width: 256, height, format };
-            assert_eq!(gles.retiled_sources(&texture).map(|pieces| pieces.len()), Some(pieces));
+            assert_eq!(gles.retiled_sources(&texture).map(|(pieces, apart)| (pieces.len(), apart.len())), Some((pieces, apart)));
             gles.copy_texture(&mut memory, &texture).unwrap();
             let mut expected = vec![0u8; (256 * height * 4) as usize];
             for y in 0..height {
@@ -7052,6 +7064,7 @@ mod tests {
             }
             assert_eq!(read_copy(&mut gles, &texture), expected, "256x{height} over two drawings");
         }
+        assert!(gles.surfaces[small].dirty.is_none(), "the small drawing was written back");
     }
 
     #[test]

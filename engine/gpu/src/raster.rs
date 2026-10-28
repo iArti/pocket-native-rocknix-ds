@@ -875,6 +875,8 @@ struct Decoded {
 
 /// set by a renderer whose GPU samples ETC1 itself.
 pub(crate) static SAMPLES_ETC1: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// whether ETC1A4 goes to it so too, its alpha a texture apart.
+pub(crate) static SAMPLES_ETC1A4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// how many texels the cache holds before it starts over, 256 MiB of them.
 const CACHED_TEXELS: usize = 64 * 1024 * 1024;
@@ -951,7 +953,11 @@ impl TextureCache {
         let packed = packs
             .then(|| crate::texture::pack_texels(data, format, width, height))
             .flatten()
-            .filter(|&(packing, _)| !matches!(packing, crate::texture::Packing::Etc1 | crate::texture::Packing::Etc1A4) || SAMPLES_ETC1.load(std::sync::atomic::Ordering::Relaxed))
+            .filter(|&(packing, _)| match packing {
+                crate::texture::Packing::Etc1 => SAMPLES_ETC1.load(std::sync::atomic::Ordering::Relaxed),
+                crate::texture::Packing::Etc1A4 => SAMPLES_ETC1A4.load(std::sync::atomic::Ordering::Relaxed),
+                _ => true,
+            })
             .map(|(packing, bytes)| (packing, Arc::from(bytes)));
         let texels: Arc<[[u8; 4]]> = match packed {
             Some(_) => Arc::from([]),

@@ -3929,6 +3929,8 @@ impl Gles {
             ADRENO.store(name.contains("Adreno"), std::sync::atomic::Ordering::Relaxed);
             if gl.supported_extensions().contains("GL_OES_compressed_ETC1_RGB8_texture") && !crate::switch("ZAKURO_NO_ETC1", "ETC1 textures decoded") {
                 crate::raster::SAMPLES_ETC1.store(true, std::sync::atomic::Ordering::Relaxed);
+                let split = !crate::switch("ZAKURO_NO_ETC1A4", "ETC1A4 textures decoded");
+                crate::raster::SAMPLES_ETC1A4.store(split, std::sync::atomic::Ordering::Relaxed);
                 log::info!("ETC1 textures stay compressed");
             }
             LOCAL.with(|local| {

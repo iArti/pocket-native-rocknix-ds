@@ -136,6 +136,7 @@ gpu_texture_copies = true # textures the game drew copied on the GPU, false
 in_place = true           # drawn textures sampled in place
 past_drawing = true       # a texture past a drawing repeats its edge
 etc1 = true               # compressed textures
+etc1a4 = true             # compressed textures with see-through parts, as two textures
 generic_shaders = false
 generic_lighting = false
 draw_ranges = true        # vertex ranges

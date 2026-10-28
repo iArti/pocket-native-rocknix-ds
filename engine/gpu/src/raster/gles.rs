@@ -2716,6 +2716,7 @@ struct Cached {
     depth_mask: Option<bool>,
     stencil: Option<Option<(u32, u32, u32)>>,
     units: [Option<(glow::Texture, Option<glow::Sampler>)>; 6],
+    active_unit: Option<usize>,
     tables_bound: Option<usize>,
     viewport: Option<[i32; 4]>,
     cull: Option<u32>,
@@ -3114,13 +3115,21 @@ impl DrawJob {
                     }
                     cache.stencil = Some(stencil);
                 }
+                // the texture and the sampler each only when it changed, the
+                // alpha units mostly share their colour unit's sampler
                 for (unit, (texture, sampler)) in self.bound.into_iter().enumerate() {
-                    if cache.units[unit] != Some((texture, sampler)) {
-                        gl.active_texture(glow::TEXTURE0 + unit as u32);
+                    let was = cache.units[unit];
+                    if was.map(|(texture, _)| texture) != Some(texture) {
+                        if cache.active_unit != Some(unit) {
+                            gl.active_texture(glow::TEXTURE0 + unit as u32);
+                            cache.active_unit = Some(unit);
+                        }
                         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                        gl.bind_sampler(unit as u32, sampler);
-                        cache.units[unit] = Some((texture, sampler));
                     }
+                    if was.map(|(_, sampler)| sampler) != Some(sampler) {
+                        gl.bind_sampler(unit as u32, sampler);
+                    }
+                    cache.units[unit] = Some((texture, sampler));
                 }
                 if cache.uniforms != self.uniforms {
                     let offset = local.uniforms.push(&gl, glow::UNIFORM_BUFFER, word_bytes(&self.uniforms))?;

@@ -149,7 +149,7 @@ details. It's off by default.
 | `frontend/` | The `pocket-native` program: panel, input, sound, menu, probe |
 | `titles/<title id>/` | Per-game profiles and hand-written code overrides |
 | `scripts/` | The kit's build (`build.sh`, `container/`) and what runs on the handheld (`device/`) |
-| `tools/` | Build helpers: title IDs, `.cia` decryption, the system font, licenses |
+| `tools/` | Build helpers: title IDs, `.cia` and `.3ds` decryption, the system font, licenses |
 
 Pocket Native builds and runs on a Linux PC too, with Mesa's OpenGL ES:
 

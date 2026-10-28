@@ -2859,8 +2859,20 @@ struct Resident {
     draws: u64,
 }
 
-/// how many bytes of arrays stay on the GPU before the oldest go.
+/// how many bytes of arrays stay on the GPU before the oldest go, each
+/// counted in whole pages.
 const RESIDENT_BYTES: usize = 64 << 20;
+
+/// how many arrays stay on the GPU before the oldest go, whatever their
+/// size: each is a buffer the driver keeps pages and bookkeeping for, and
+/// Ocarina of Time 3D makes some 85 small ones a second, which ran a 1 GB
+/// handheld out of memory with this cache at a tenth of its bytes.
+const RESIDENT_ARRAYS: usize = 2048;
+
+/// what an array costs the driver at least, whole 4 KiB pages.
+fn resident_cost(len: usize) -> usize {
+    len.next_multiple_of(4096)
+}
 
 impl Resident {
     fn buffer(&mut self, gl: &glow::Context, array: &Arc<[u8]>) -> Result<glow::Buffer, String> {
@@ -2870,26 +2882,16 @@ impl Resident {
             *used = draws;
             return Ok(*buffer);
         }
-        if self.bytes + array.len() > RESIDENT_BYTES {
-            // the arrays no draw used lately go, all of them when that is not
-            // enough
-            let recent = draws.saturating_sub(20_000);
-            let mut gone = Vec::new();
-            self.buffers.retain(|_, (buffer, array, used)| {
-                let keep = *used >= recent;
-                if !keep {
-                    gone.push((*buffer, array.len()));
-                }
-                keep
-            });
-            if self.bytes + array.len() > RESIDENT_BYTES + gone.iter().map(|(_, len)| len).sum::<usize>() {
-                gone.extend(self.buffers.drain().map(|(_, (buffer, array, _))| (buffer, array.len())));
-            }
-            for (buffer, len) in gone {
-                self.bytes -= len;
-                // SAFETY: on the GL thread, the draws that read it were issued
-                unsafe { gl.delete_buffer(buffer) };
-            }
+        let cost = resident_cost(array.len());
+        // the array no draw used for longest goes, one for each new one once
+        // full rather than many in one draw, and never one the draw being
+        // made already took
+        while self.bytes + cost > RESIDENT_BYTES || self.buffers.len() >= RESIDENT_ARRAYS {
+            let Some(oldest) = self.buffers.iter().filter(|(_, (_, _, used))| *used != draws).min_by_key(|(_, (_, _, used))| *used).map(|(&key, _)| key) else { break };
+            let (buffer, array, _) = self.buffers.remove(&oldest).expect("an array just found");
+            self.bytes -= resident_cost(array.len());
+            // SAFETY: on the GL thread, the draws that read it were issued
+            unsafe { gl.delete_buffer(buffer) };
         }
         // SAFETY: on the GL thread with the context current
         let buffer = unsafe {
@@ -2898,7 +2900,7 @@ impl Resident {
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, array, glow::STATIC_DRAW);
             buffer
         };
-        self.bytes += array.len();
+        self.bytes += cost;
         self.buffers.insert(key, (buffer, array.clone(), draws));
         Ok(buffer)
     }

@@ -28,7 +28,7 @@ function Pick($title, $filter, $many) {
 }
 
 if ($Rom.Count -eq 0) {
-    $Rom = @(Pick "Pick the games to build" "3DS games (*.3ds;*.cci;*.cia)|*.3ds;*.cci;*.cia|All files|*.*" $true)
+    $Rom = @(Pick "Pick the games to build" "3DS games (*.3ds;*.cci;*.cia;*.zcci)|*.3ds;*.cci;*.cia;*.zcci|All files|*.*" $true)
     if ($Rom.Count -eq 0) {
         Write-Host "no game picked"
         exit 2

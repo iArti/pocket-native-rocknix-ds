@@ -31,7 +31,7 @@ pick() {
 }
 
 if [ ${#roms[@]} -eq 0 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
-    mapfile -t roms < <(pick "Pick the games to build" "3DS games" "*.3ds *.cci *.cia *.3DS *.CCI *.CIA" many || true)
+    mapfile -t roms < <(pick "Pick the games to build" "3DS games" "*.3ds *.cci *.cia *.zcci *.3DS *.CCI *.CIA *.ZCCI" many || true)
     [ ${#roms[@]} -eq 0 ] && { echo "no game picked"; exit 2; }
 fi
 if [ ${#roms[@]} -eq 0 ]; then
@@ -53,7 +53,7 @@ user=(--user "$(id -u):$(id -g)")
 [ "$(basename "$engine")" = podman ] && user=(--userns=keep-id)
 failed=()
 for rom in "${roms[@]}"; do
-    mounts=(-v "$repo:/src:ro" -v "$out/.work:/work" -v "$out:/out" -v "$(dirname "$rom"):/rom:ro")
+    mounts=(-v "$repo:/src:ro,Z" -v "$out/.work:/work" -v "$out:/out" -v "$(dirname "$rom"):/rom:ro,Z")
     args=("/rom/$(basename "$rom")")
     # a .cia takes the keys given, else the aes_keys.txt beside it or in the
     # kit, else the one picked when asked

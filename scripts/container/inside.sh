@@ -19,6 +19,12 @@ case "${rom,,}" in
         python3 tools/cia2cci.py "$rom" /work/game.3ds "$keys"
         game=/work/game.3ds
         ;;
+    *.zcci)
+        echo "== decompressing the .zcci (Z3DS)"
+        rm -f /work/game.3ds
+        tail -c +161 "$rom" | zstd -d -c > /work/game.3ds
+        game=/work/game.3ds
+        ;;
     *) game="$rom" ;;
 esac
 id=$(python3 tools/title_id.py "$game")

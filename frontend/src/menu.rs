@@ -585,11 +585,13 @@ pub struct Status {
     clock: Option<String>,
     /// what a hotkey just did, at the top.
     pub note: Option<&'static str>,
+    /// how many shaders are still building, at the top left.
+    building: Option<usize>,
 }
 
 impl Status {
     /// none when the settings show nothing.
-    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>) -> Option<Status> {
+    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>, building: Option<usize>) -> Option<Status> {
         let read = |path: &str| std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse::<i64>().ok());
         let status = Status {
             fps: settings.show_fps.then(|| match read("/sys/class/thermal/thermal_zone0/temp") {
@@ -599,8 +601,9 @@ impl Status {
             battery: settings.show_clock.then(battery).flatten(),
             clock: settings.show_clock.then(clock),
             note,
+            building,
         };
-        (status.fps.is_some() || status.clock.is_some() || note.is_some()).then_some(status)
+        (status.fps.is_some() || status.clock.is_some() || note.is_some() || building.is_some()).then_some(status)
     }
 
     pub fn draw(&self, canvas: &mut Canvas, (width, height): (u32, u32)) {
@@ -611,6 +614,11 @@ impl Status {
             let half = canvas.measure(BIG, note) / 2.0 + 6.0;
             canvas.fill([width / 2.0 - half, 8.0, width / 2.0 + half, 32.0], backing);
             canvas.text(BIG, note, width / 2.0 - half + 6.0, 11.0, rgba(TEXT, 255), false);
+        }
+        if let Some(building) = self.building {
+            let line = format!("Building shaders ({building})");
+            canvas.fill([8.0, 8.0, 20.0 + canvas.measure(BIG, &line), 32.0], backing);
+            canvas.text(BIG, &line, 14.0, 11.0, rgba(TEXT, 255), false);
         }
         if let Some(line) = &self.fps {
             canvas.fill([width - 20.0 - canvas.measure(BIG, line), top, width - 8.0, bottom], backing);

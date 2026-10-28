@@ -1241,6 +1241,14 @@ static SECOND_SHOWS_TOP: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// whether the second window's screen is stretched over all of it.
 static SECOND_STRETCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// programs the compiler thread has yet to build.
+static BUILDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// how many programs are still being built, for the screen to say so.
+pub fn compiling() -> usize {
+    BUILDING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// whether the second window's screen fills all of it, out of shape, rather
 /// than keeping its shape with bars.
 pub fn set_second_stretched(stretched: bool) {
@@ -3633,6 +3641,7 @@ impl Compiler {
                     let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
                     // SAFETY: the context is current on this thread
                     unsafe { gl.finish() };
+                    BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     if finished.send((job.key, result)).is_err() {
                         break;
                     }
@@ -5177,7 +5186,9 @@ impl Gles {
         if !wait && !self.preloading {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
+                BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached }).is_err() {
+                    BUILDING.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.compiler = None;
                 }
                 return Ok(None);

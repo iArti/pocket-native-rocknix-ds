@@ -4837,20 +4837,24 @@ impl Gles {
         let input_kind = Kind::Color(t.input_format);
         let output_kind = Kind::Color(t.output_format);
         static CPU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if t.input_linear || t.copy.0 == 0 || t.copy.1 == 0 || *CPU.get_or_init(|| crate::switch("ZAKURO_CPU_TRANSFERS", "display transfers on the CPU")) {
+        if t.copy.0 == 0 || t.copy.1 == 0 || *CPU.get_or_init(|| crate::switch("ZAKURO_CPU_TRANSFERS", "display transfers on the CPU")) {
             return Ok(false);
         }
         let rows = t.copy.1 * t.scale.1;
         let first = if t.flip { t.input_height - rows } else { 0 };
-        let tile_rows = 8 * t.input_width * input_kind.bytes();
+        // a linear input is a picture an earlier transfer left linear, as
+        // Paper Mario's, read the same way, row by row rather than eight
+        let tiled = !t.input_linear;
+        let step = if tiled { 8 } else { 1 };
+        let tile_rows = step * t.input_width * input_kind.bytes();
         let row_in = |s: &Surface| {
-            let offset = t.input.checked_sub(s.addr).filter(|offset| offset % tile_rows == 0)? / tile_rows * 8;
+            let offset = t.input.checked_sub(s.addr).filter(|offset| offset % tile_rows == 0)? / tile_rows * step;
             (offset + first + rows <= s.height).then_some(offset)
         };
         let Some((addr, input_size, row)) = self
             .surfaces
             .iter()
-            .filter(|s| s.kind == input_kind && s.tiled && s.width == t.input_width)
+            .filter(|s| s.kind == input_kind && s.tiled == tiled && s.width == t.input_width)
             .filter_map(|s| Some((s, row_in(s)?)))
             .max_by_key(|(s, _)| (s.dirty.is_some(), s.height))
             .map(|(s, row)| (s.addr, (s.width, s.height), row))
@@ -4864,7 +4868,7 @@ impl Gles {
         }
         self.current()?;
         let (source, target) = loop {
-            let source = self.surface_rows(memory, addr, input_size, input_kind, true, None)?;
+            let source = self.surface_rows(memory, addr, input_size, input_kind, tiled, None)?;
             let target = self.surface_rows(memory, t.output, (t.output_width, t.output_height), output_kind, t.output_tiled, None)?;
             if self.surfaces[source].checked && self.surfaces[target].checked {
                 break (source, target);
@@ -7131,6 +7135,58 @@ mod tests {
         assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
         gles.flush(&mut memory).unwrap();
         assert_eq!(&memory.0[output as usize..output as usize + expected.len()], &expected[..], "drawing first {drawing_first}");
+    }
+
+    #[test]
+    fn a_transfer_out_of_a_linear_picture_stays_on_the_gpu() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        // a picture an earlier transfer left linear, transferred back into a
+        // tiled texture, as Paper Mario: Sticker Star does every frame
+        let format = ColorFormat::Rgba8;
+        let (input, output, width, height) = (0x1000u32, 0x10000u32, 32u32, 48u32);
+        let mut memory = Flat(vec![0; 0x20000]);
+        for (i, byte) in memory.0[input as usize..(input + width * height * 4) as usize].iter_mut().enumerate() {
+            *byte = (i * 37 + i / 5) as u8;
+        }
+        for flip in [false, true] {
+            let index = gles.surface_rows(&mut memory, input, (width, height), Kind::Color(format), false, None).unwrap();
+            gles.surfaces[index].drew((0, height));
+            let transfer = Transfer {
+                input,
+                output,
+                input_width: width,
+                input_height: height,
+                output_width: width,
+                output_height: height,
+                copy: (width, height),
+                scale: (1, 1),
+                flip,
+                input_linear: true,
+                output_tiled: true,
+                input_format: format,
+                output_format: format,
+                column: 0,
+            };
+            let mut expected = vec![0u8; (width * height * 4) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let from = if flip { height - 1 - y } else { y };
+                    let at = (input + pixel_offset(false, x, from, width, 4) as u32) as usize;
+                    let to = pixel_offset(true, x, y, width, 4);
+                    expected[to..to + 4].copy_from_slice(&memory.0[at..at + 4]);
+                }
+            }
+            assert!(gles.display_transfer(&mut memory, &transfer).unwrap());
+            assert!(gles.surfaces.iter().any(|s| s.addr == input && !s.tiled && s.dirty.is_some()), "the picture stayed on the GPU");
+            gles.flush(&mut memory).unwrap();
+            assert_eq!(&memory.0[output as usize..output as usize + expected.len()], &expected[..], "flip {flip}");
+        }
     }
 
     #[test]

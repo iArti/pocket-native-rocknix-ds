@@ -4768,7 +4768,7 @@ impl Gles {
             let bpp = s.kind.bytes();
             let (tile, tile_row) = (64 * bpp, 8 * s.row_bytes());
             let offset = input.checked_sub(s.addr)?;
-            if offset + size > s.size() || !offset.is_multiple_of(tile) {
+            if offset >= s.size() || !offset.is_multiple_of(tile) {
                 return None;
             }
             // a line of the input is whole rows of tiles, or the same few
@@ -4778,6 +4778,11 @@ impl Gles {
                 (bytes, skip) if bytes + skip == tile_row => bytes,
                 _ => return None,
             };
+            // whole rows of tiles can run on past the drawing into memory,
+            // as Federation Force copies 64 rows out of 56
+            if offset + size > s.size() && line != tile_row {
+                return None;
+            }
             let start = offset % tile_row;
             if !line.is_multiple_of(tile) || !size.is_multiple_of(line) || start + line > tile_row || (line == tile_row && start != 0) {
                 return None;
@@ -7268,6 +7273,29 @@ mod tests {
             // not starting on a tile is the CPU's
             assert!(!gles.texture_copy(&mut memory, source + 16, target, tile_rows, (0, 0), (0, 0)).unwrap());
         }
+    }
+
+    #[test]
+    fn a_texture_copy_running_past_a_drawing_takes_the_rest_from_memory() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let (source, target, width, height) = (0x1000u32, 0x8000u32, 32u32, 24u32);
+        let tile_rows = 8 * width * 4;
+        let mut memory = Flat(vec![0; 0x20000]);
+        for (i, byte) in memory.0[source as usize..(source + 4 * tile_rows) as usize].iter_mut().enumerate() {
+            *byte = (i * 37 + i / 5) as u8;
+        }
+        let index = gles.surface_rows(&mut memory, source, (width, height), Kind::Color(ColorFormat::Rgba8), true, None).unwrap();
+        gles.surfaces[index].drew((0, height));
+        // a row of tiles more than the drawing has, as Federation Force copies 64 rows out of 56
+        assert!(gles.texture_copy(&mut memory, source, target, 4 * tile_rows, (0, 0), (0, 0)).unwrap());
+        gles.flush(&mut memory).unwrap();
+        assert_eq!(&memory.0[target as usize..(target + 4 * tile_rows) as usize], &memory.0[source as usize..(source + 4 * tile_rows) as usize]);
     }
 
     #[test]

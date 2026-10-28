@@ -48,10 +48,12 @@ isn't counted against any game here.
 | Kirby: Triple Deluxe | Starts | PC | Gets into the first stage. Since 0.4.3 it no longer asks you to accept the Service User Agreement |
 | The Legend of Zelda: A Link Between Worlds | Playable | PC, reported: RX6H, 0.2, RG DS (Android), 0.4.3 | About 40 fps on the RG DS, with glitches during transitions. Some glitches in effects reported. Some R36S players find 0.4.3 slower than 0.4.0 here: if it is for you, try **Compressed alpha textures** off in the advanced settings |
 | The Legend of Zelda: Ocarina of Time 3D | Playable | PC, R36S sim | Full speed in Link's house in the R36S sim, about half in the Kokiri Forest fly-in. Stutter reported on 0.2 |
-| Luigi's Mansion | Broken | Reported: 0.1 | Both screens black |
+| Luigi's Mansion | Starts | PC, R36S sim | The opening plays into the mansion. About 20 fps in the R36S sim, with dips. Both screens were black on 0.1 |
 | Mario & Luigi: Dream Team | Broken | Reported: 0.2 | Black screen |
 | Mario Kart 7 | Playable | R36S, PC | Tuned on the US version. Races run well once a track's shaders are built, the first race on a track stutters. Some testers report it slower than that. Since 0.4.3 a first start goes straight to the menus, where it used to stop at "There are currently no Mii characters" |
+| Metroid Prime: Federation Force | Slow | PC, R36S sim | The opening plays into the training. About 6 fps in the R36S sim, its GPU flat out |
 | Metroid: Samus Returns | Starts | R36S, PC | The intro plays into the game. The black frames between its intro pictures are the game's own fades. About 60% of full speed on the R36S on 0.4.3, against about a third on 0.4.0 |
+| My Hero Academia: Battle for All | Starts | PC, R36S sim | Japanese version. The opening plays into the first tutorial. About 15 fps in the R36S sim |
 | Monster Hunter 4 Ultimate | Slow | Reported: RX6H, 0.2 | 6 fps on the defaults. Its profile now turns on **Real-time GPU**, which a tester found faster |
 | New Super Mario Bros. 2 | Playable | PC, reported: 0.2.5 | Close to fully playable on 0.2.5 (European version). The Special Edition crashed on 0.4.0 when turning SpotPass off, fixed in 0.4.3 |
 | Nintendogs + Cats | Starts | Reported: RG DS (Android), 0.4.3 | The intro runs at about 2 fps |

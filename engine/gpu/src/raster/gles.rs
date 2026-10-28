@@ -362,6 +362,10 @@ const EQUATIONS: [u32; 5] = [glow::FUNC_ADD, glow::FUNC_SUBTRACT, glow::FUNC_REV
 
 const TEXTURE_KEEP_FLUSHES: u64 = 600;
 
+/// batches a program nothing drew with is kept for once the driver ran out
+/// of room.
+const PROGRAM_KEEP_FLUSHES: u64 = 600;
+
 /// batches a surface nothing drew into or read stays for, and how often the
 /// ones past it are let go.
 const SURFACE_KEEP_FLUSHES: u64 = 600;
@@ -3863,6 +3867,13 @@ pub struct Gles {
     flushes: u64,
     /// the batch surfaces left unused are next looked for.
     retire_at: u64,
+    /// the batch each program last drew in, and the last one stamped.
+    program_used: rustc_hash::FxHashMap<glow::Program, u64>,
+    stamped: Option<(glow::Program, u64)>,
+    /// the batch room was last made in, and the programs that got a second
+    /// try after it.
+    room_made: Option<u64>,
+    retried: rustc_hash::FxHashSet<ProgramKey>,
     /// display transfers so far, the clock occlusion culling keeps time by.
     pictures: u64,
     warned_logic_op: bool,
@@ -3965,6 +3976,10 @@ impl Gles {
                 over_drawing: Default::default(),
                 flushes: 0,
                 retire_at: RETIRE_EVERY,
+                program_used: Default::default(),
+                stamped: None,
+                room_made: None,
+                retried: Default::default(),
                 pictures: 0,
                 warned_logic_op: false,
                 preloading: false,
@@ -5170,7 +5185,15 @@ impl Gles {
             return worker.run(|| self.program(constants, writes_depth, lighting, vertex, wait, None));
         }
         disturb();
-        let program = build_program(&self.gl, &compiled, &fragment, cached.as_deref())?;
+        let program = match build_program(&self.gl, &compiled, &fragment, cached.as_deref()) {
+            Ok(program) => program,
+            Err(error) if self.retried.insert(key.clone()) => {
+                log::warn!("{error}");
+                self.make_room();
+                build_program(&self.gl, &compiled, &fragment, cached.as_deref())?
+            }
+            Err(error) => return Err(error),
+        };
         self.programs.insert(key.clone(), program);
         self.note_program(&key);
         Ok(Some(program))
@@ -5199,6 +5222,12 @@ impl Gles {
                 }
                 Err(error) => {
                     log::warn!("{error}");
+                    // the driver out of memory, most likely: the next draw
+                    // that needs it tries again once room is made
+                    if self.retried.insert(key.clone()) {
+                        self.make_room();
+                        continue;
+                    }
                     self.inputs.remove(&key);
                     if key.3 != 0 {
                         for translation in self.translated.values_mut() {
@@ -5207,7 +5236,7 @@ impl Gles {
                             }
                         }
                     }
-                    compiler.failed.insert(key, error);
+                    self.compiler.as_mut().expect("the compiler is still there").failed.insert(key, error);
                 }
             }
         }
@@ -5902,6 +5931,63 @@ impl Gles {
         }
     }
 
+    /// lets go of what the driver holds that can be made again when it
+    /// could not build a program, on a handheld its memory running out: the
+    /// textures, the vertex arrays kept on the GPU and the programs nothing
+    /// drew with for a while, rather than every draw after it going to the
+    /// CPU. Once a batch at most.
+    fn make_room(&mut self) {
+        if self.room_made == Some(self.flushes) {
+            return;
+        }
+        self.room_made = Some(self.flushes);
+        // the batch being made keeps what its draws already took
+        let mut textures = Vec::new();
+        let flushes = self.flushes;
+        self.textures.retain(|_, texture| {
+            let keep = texture.used == flushes;
+            if !keep {
+                textures.extend([Some(texture.texture), texture.alpha].into_iter().flatten());
+            }
+            keep
+        });
+        let recent = self.flushes.saturating_sub(PROGRAM_KEEP_FLUSHES);
+        let mut programs = Vec::new();
+        let used = &self.program_used;
+        self.programs.retain(|_, program| {
+            let keep = used.get(program).is_some_and(|&at| at >= recent);
+            if !keep {
+                programs.push(*program);
+            }
+            keep
+        });
+        for program in &programs {
+            self.program_used.remove(program);
+        }
+        self.fragment = None;
+        self.stamped = None;
+        log::warn!("the driver could not build a program: letting go of {} textures, {} programs and the vertex arrays kept on the GPU", textures.len(), programs.len());
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            disturb();
+            local(|local| {
+                for (_, (buffer, _, _)) in local.resident.buffers.drain() {
+                    // SAFETY: on the GL thread, after every draw that used it
+                    unsafe { gl.delete_buffer(buffer) };
+                }
+                local.resident.bytes = 0;
+                (local.cache.resident, local.cache.stride) = (None, None);
+            });
+            // SAFETY: on the GL thread, after every draw that used them, the
+            // finish letting the driver take their memory back
+            unsafe {
+                textures.into_iter().for_each(|texture| gl.delete_texture(texture));
+                programs.into_iter().for_each(|program| gl.delete_program(program));
+                gl.finish();
+            }
+        });
+    }
+
     pub(crate) fn sync<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32) -> Result<(), String> {
         if !self.surfaces.iter().any(|s| s.dirty_overlaps(addr, len)) {
             self.surfaces.iter_mut().filter(|s| s.overlaps(addr, len)).for_each(|s| s.checked = false);
@@ -6525,6 +6611,10 @@ impl Gles {
             }
             (words, program)
         };
+        if self.stamped != Some((program, self.flushes)) {
+            self.stamped = Some((program, self.flushes));
+            self.program_used.insert(program, self.flushes);
+        }
 
         drop(worded);
         let color_mask = if r[REG_COLOR_BUFFER_WRITE] != 0 { (r[REG_DEPTH_COLOR_MASK] >> 8) & 0xF } else { 0 };

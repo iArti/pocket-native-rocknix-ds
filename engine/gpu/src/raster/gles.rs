@@ -3961,9 +3961,38 @@ impl Gles {
                 quarters: 4,
                 natives: Default::default(),
             };
+            gles.prepare_helpers();
             gles.preload();
             gles.prepare_stand_ins();
             Ok(gles)
+        }
+    }
+
+    /// builds the programs copies, transfers and read backs use before the
+    /// compiler thread has work, rather than the first one a game needs
+    /// waiting on the GL thread for the compiler's lock while it builds the
+    /// game's own, which stopped everything for half a minute on a first run.
+    fn prepare_helpers(&mut self) {
+        let mut build = || -> Result<(), String> {
+            self.transfer = Some(self.compute(TRANSFER_SOURCE)?);
+            self.reinterpreter = Some(self.compute(REINTERPRET_SOURCE)?);
+            self.upright = Some(self.compute(UPRIGHT_SOURCE)?);
+            let depth = self.graphics(PACK_VERTEX_SOURCE, PACK_DEPTH_SOURCE)?;
+            let stencil = self.graphics(PACK_VERTEX_SOURCE, PACK_STENCIL_SOURCE)?;
+            let copiers = [
+                self.graphics(PACK_VERTEX_SOURCE, COPY_COLOR_SOURCE)?,
+                self.graphics(PACK_VERTEX_SOURCE, COPY_DEPTH_SOURCE)?,
+                self.graphics(PACK_VERTEX_SOURCE, COPY_STENCIL_SOURCE)?,
+            ];
+            // SAFETY: on the GL thread
+            let (packing, copying) = unsafe { (self.gl.create_vertex_array()?, self.gl.create_vertex_array()?) };
+            self.packers = Some((depth, stencil, packing));
+            self.copiers = Some((copiers, copying));
+            Ok(())
+        };
+        // the ones not built are built when first needed, as before
+        if let Err(error) = build() {
+            log::warn!("the copy and transfer programs wait until needed, {error}");
         }
     }
 

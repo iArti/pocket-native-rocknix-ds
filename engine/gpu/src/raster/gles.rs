@@ -5611,7 +5611,13 @@ impl Gles {
         o.dirty = left;
         o.checked = false;
         o.stale = true;
-        o.shadow = Vec::new();
+        // the rows that came over no longer match memory, the rest still say
+        // what it held, for a write back to see the CPU wrote there since,
+        // as Kid Icarus keeps its heap where a picture's last rows were drawn
+        let row = o.row_bytes() as usize;
+        if let Some(rows) = o.shadow.get_mut(gone_from as usize * row..gone_to as usize * row) {
+            rows.iter_mut().for_each(|byte| *byte = !*byte);
+        }
         o.picture = None;
         let s = &mut self.surfaces[index];
         s.dirty = Some(merged);
@@ -6206,15 +6212,17 @@ impl Gles {
             let (first, last) = s.dirty.unwrap_or((0, height));
             // memory the CPU wrote since the GPU last looked is newer than the
             // drawing, as when a draw finds it changed, a title that freed the
-            // buffer may keep its heap there
+            // buffer may keep its heap there: the rows that would go out are
+            // the ones compared
             let (addr, size) = (s.addr, s.size() as usize);
+            let (from, to) = (first as usize * s.row_bytes() as usize, last as usize * s.row_bytes() as usize);
             let written = s.shadow.len() == size
-                && match memory.slice(addr, size) {
-                    Some(now) => now != &s.shadow[..],
+                && match memory.slice(addr + from as u32, to - from) {
+                    Some(now) => now != &s.shadow[from..to],
                     None => {
-                        let mut now = vec![0u8; size];
-                        memory.read(addr, &mut now);
-                        now != s.shadow
+                        let mut now = vec![0u8; to - from];
+                        memory.read(addr + from as u32, &mut now);
+                        now != s.shadow[from..to]
                     }
                 };
             if written {

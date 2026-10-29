@@ -819,10 +819,6 @@ impl System {
         self.gpu_work(&[], move |gpu, _, _| gpu.skip_bottom = skip);
     }
 
-    pub fn set_bottom_relearn(&mut self, relearn: bool) {
-        self.gpu_work(&[], move |gpu, _, _| gpu.bottom_relearn = relearn);
-    }
-
     pub fn set_skip_right_eye(&mut self, skip: bool) {
         self.gpu_work(&[], move |gpu, _, _| gpu.skip_right_eye = skip);
     }

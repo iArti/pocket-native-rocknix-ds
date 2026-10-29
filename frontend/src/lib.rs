@@ -65,7 +65,6 @@ fn apply_options(system: &mut System, game: &GameSettings, profile: &Profile, ba
     system.set_bottom_full_rate(full_rate);
     let advanced = Advanced::of(game, profile);
     system.set_skip_bottom(advanced.skip_bottom);
-    system.set_bottom_relearn(profile.bottom_relearn);
     system.set_skip_right_eye(advanced.skip_right_eye);
 }
 

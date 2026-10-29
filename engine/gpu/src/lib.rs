@@ -328,11 +328,13 @@ pub struct Gpu {
     /// a title drawing both screens between two transfers, whose bottom
     /// screen is never skipped, as that would take the top one with it.
     both_screens: bool,
-    /// when a skipped bottom picture went to the top
-    both_at: Option<u64>,
-    /// bottom screen skipping back on a while after that, for titles doing
-    /// it only around their title screen.
-    pub bottom_relearn: bool,
+    /// a skipped bottom picture went to the top, which holds bottom screen
+    /// skipping off until the title draws its top screen again, as titles do
+    /// around their title screen and while paused. the third time soon after
+    /// the one before turns it off for the title.
+    bottom_held: bool,
+    misfired_at: u64,
+    misfires: u8,
     /// the bottom screen drawn with every picture while it changes, not
     /// every other one.
     pub bottom_full_rate: bool,
@@ -435,8 +437,9 @@ impl Gpu {
             skipping_frame: false,
             skipped_targets: Vec::new(),
             both_screens: false,
-            both_at: None,
-            bottom_relearn: false,
+            bottom_held: false,
+            misfired_at: 0,
+            misfires: 0,
             bottom_full_rate: false,
             #[cfg(feature = "gles")]
             panel: None,
@@ -693,10 +696,16 @@ impl Gpu {
             let start_at = memory.translate(start) as u64;
             (input as u64) < start_at + (end - start) as u64 && start_at < input_end
         });
-        if self.skipped_bottom && from_skipped && shown_on == Some(0) && !self.both_screens {
-            log::info!("switch: bottom screen skipping off, a skipped picture went to the top screen");
-            self.both_screens = true;
-            self.both_at = Some(self.transfers);
+        if self.skipped_bottom && from_skipped && shown_on == Some(0) && !self.both_screens && !self.bottom_held {
+            let soon = self.misfires > 0 && self.transfers - self.misfired_at < 60;
+            (self.misfires, self.misfired_at) = (if soon { self.misfires + 1 } else { 1 }, self.transfers);
+            if self.misfires == 3 {
+                log::info!("switch: bottom screen skipping off, skipped pictures kept going to the top screen");
+                self.both_screens = true;
+            } else {
+                log::info!("switch: bottom screen skipping held, a skipped picture went to the top screen");
+                self.bottom_held = true;
+            }
         }
         if let Some((0, buffer)) = reached {
             let right = self.right_buffers.contains(&buffer);
@@ -1431,6 +1440,10 @@ impl Gpu {
     fn skips<M: GpuMemory>(&mut self, memory: &M) -> bool {
         let height = (raster::read_float24(&self.internal, registers::REG_VIEWPORT_HEIGHT) * 2.0).round();
         let screen = if height == 320.0 { 1 } else if height == 400.0 { 2 } else { 0 };
+        if screen == 2 && self.bottom_held {
+            log::info!("switch: bottom screen skipping back on");
+            self.bottom_held = false;
+        }
         if !self.drawing {
             self.drawing = true;
             let skip_draws = self.skip_draws && !(screen == 1 && self.keep_bottom);
@@ -1496,11 +1509,7 @@ impl Gpu {
     /// bottom screen a picture by display transfer, which some never do, nor
     /// for a title drawing both screens between transfers.
     fn skips_bottom(&mut self) -> bool {
-        if self.bottom_relearn && self.both_at.is_some_and(|at| self.transfers - at >= 300) {
-            log::info!("switch: bottom screen skipping back on");
-            (self.both_screens, self.both_at) = (false, None);
-        }
-        if !fast() || !self.skip_bottom || self.bottom_shown.is_none() || self.both_screens {
+        if !fast() || !self.skip_bottom || self.bottom_shown.is_none() || self.both_screens || self.bottom_held {
             return false;
         }
         let first = std::mem::replace(&mut self.bottom_first, self.picture_hash) == self.picture_hash;

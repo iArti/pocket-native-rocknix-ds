@@ -123,6 +123,10 @@ struct Discovery<'a> {
     /// the push of a function the scan started a few instructions before it,
     /// a way in all the same.
     pushes: BTreeMap<u32, u32>,
+    /// literals only Thumb code loads, which ARM code running into them
+    /// goes on through: Thumb read out of ARM code by mistake loads them
+    /// from the middle of it.
+    thumb_literals: BTreeSet<u32>,
 }
 
 pub fn analyze(program: &Program) -> Analysis {
@@ -140,6 +144,7 @@ pub fn analyze(program: &Program) -> Analysis {
         queue: VecDeque::new(),
         guesses: VecDeque::new(),
         pushes: BTreeMap::new(),
+        thumb_literals: BTreeSet::new(),
     };
     // where relocations say the code holds data, it cannot be code
     for &slot in program.slots.iter().flatten() {
@@ -316,7 +321,7 @@ impl Discovery<'_> {
             labels.insert(start);
             let mut address = start;
             while self.text.contains(address) && seen.insert(address) {
-                if self.byte(address) == Byte::Literal {
+                if self.byte(address) == Byte::Literal && !(mode == Mode::Arm && self.thumb_literals.contains(&(address & !3))) {
                     // ran into a literal pool, the path is wrong or it ended
                     break;
                 }
@@ -399,6 +404,9 @@ impl Discovery<'_> {
                         // a load from something already decoded as code is
                         // left alone
                         if self.text.contains(literal) && self.byte(literal) != Byte::Code {
+                            if mode == Mode::Thumb && self.byte(literal) == Byte::Unknown {
+                                self.thumb_literals.insert(literal & !3);
+                            }
                             self.mark(literal, size, Byte::Literal);
                             if size == 4 && self.may_point(literal) {
                                 if let Some(value) = self.text.read32(literal) {
@@ -649,6 +657,21 @@ mod tests {
         let labels = &analysis.functions[&BASE].labels;
         assert!(labels.contains(&(BASE + 0x20)) && labels.contains(&(BASE + 0x24)));
         assert_eq!(analysis.count(Byte::Literal), 8);
+    }
+
+    #[test]
+    fn arm_code_goes_on_through_what_only_thumb_loads() {
+        let analysis = analyze_words(&[
+            0xFA00_0001, // blx 0x10000c
+            0xEB00_0002, // bl 0x100014
+            0xE12F_FF1E, // bx lr
+            0x4770_4802, // ldr r0, [pc, 8] (0x100018) then bx lr, in Thumb
+            0x0000_0000,
+            0xE3A0_0001, // mov r0, 1
+            0xE3A0_1002, // mov r1, 2, which the Thumb loads
+            0xE12F_FF1E, // bx lr
+        ]);
+        assert!(analysis.functions[&(BASE + 0x14)].instructions.contains(&(BASE + 0x1C)));
     }
 
     #[test]

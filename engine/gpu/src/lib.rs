@@ -677,6 +677,11 @@ impl Gpu {
         // the draws name their color buffers by physical address, which
         // translate takes where transfers name them
         let input = memory.translate(input_paddr);
+        #[cfg(feature = "gles")]
+        if shown_on == Some(0) && !self.resources.shown_top.contains(&input) {
+            self.resources.shown_top.rotate_right(1);
+            self.resources.shown_top[0] = input;
+        }
         let input_end = input as u64 + (input_dimensions & 0xFFFF) as u64 * (input_dimensions >> 16) as u64 * 4;
         let from_skipped = self.skipped_targets.iter().any(|&(start, end)| {
             let start_at = memory.translate(start) as u64;

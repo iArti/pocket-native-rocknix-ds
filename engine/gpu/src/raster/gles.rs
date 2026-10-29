@@ -6631,6 +6631,7 @@ impl Gles {
                 Ok(Some(program)) => program,
                 // shaded on the CPU meanwhile
                 Ok(None) if vertex != 0 => return Err(COMPILING.to_owned()),
+                Ok(None) if draw.skippable => return Ok(()),
                 Ok(None) => {
                     exact = false;
                     self.program(&generic_constants(&constants), writes_depth, &[], 0, true, None)?.ok_or("no generic program")?

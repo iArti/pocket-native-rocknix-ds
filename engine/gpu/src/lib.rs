@@ -360,6 +360,11 @@ pub struct Gpu {
     /// title.
     period_target: u32,
     skipped_bottom: bool,
+    /// the color buffer the last picture the bottom screen showed came from:
+    /// only draws into it are left out as the bottom screen's, a pass of the
+    /// same size into a texture a title draws once is not, as Metroid Samus
+    /// Returns' menus are.
+    bottom_from: Option<(u32, u32)>,
     right_eye_wrong: bool,
     /// the host's GPU showing the screens on the panel while the software
     /// rasterizer draws them.
@@ -446,6 +451,7 @@ impl Gpu {
             right_eye_short: 0,
             period_target: 0,
             skipped_bottom: false,
+            bottom_from: None,
             right_eye_wrong: false,
             skipped_at: 0,
             bottom_shown: None,
@@ -719,7 +725,8 @@ impl Gpu {
             if self.skipping {
                 self.bottom_skipped += 1;
             } else {
-                (self.bottom_skipped, self.bottom_shown) = (0, Some(output_paddr));
+                let input_end = input.saturating_add((input_dimensions & 0xFFFF) * (input_dimensions >> 16) * 4);
+                (self.bottom_skipped, self.bottom_shown, self.bottom_from) = (0, Some(output_paddr), Some((input, input_end)));
                 self.bottom_pictures += 1;
             }
         }
@@ -1421,7 +1428,7 @@ impl Gpu {
     }
 
     /// whether the frame being drawn is skipped, decided at its first draw.
-    fn skips(&mut self) -> bool {
+    fn skips<M: GpuMemory>(&mut self, memory: &M) -> bool {
         let height = (raster::read_float24(&self.internal, registers::REG_VIEWPORT_HEIGHT) * 2.0).round();
         let screen = if height == 320.0 { 1 } else if height == 400.0 { 2 } else { 0 };
         if !self.drawing {
@@ -1438,7 +1445,10 @@ impl Gpu {
                 self.left_eye = None;
             }
             self.period_target = target;
-            self.skipped_bottom = screen == 1 && self.skips_bottom();
+            let dimensions = self.internal[REG_FRAMEBUFFER_DIMENSIONS];
+            let drawn = memory.translate(target);
+            let drawn = (drawn, drawn.saturating_add((dimensions & 0x7FF) * (((dimensions >> 12) & 0x3FF) + 1) * 4));
+            self.skipped_bottom = screen == 1 && self.bottom_from.is_some_and(|(start, end)| drawn.0 < end && start < drawn.1) && self.skips_bottom();
             self.skipping = skip_draws || right_eye || self.skipped_bottom;
             self.skipped_targets.clear();
         } else if self.screens_drawn | screen != self.screens_drawn {
@@ -1546,7 +1556,7 @@ impl Gpu {
         }
         let vertices = std::mem::take(&mut self.immediate.vertices);
         self.draw_calls += 1;
-        if self.skips() {
+        if self.skips(memory) {
             return;
         }
         self.vertices_drawn += vertices.len() as u64;
@@ -1610,7 +1620,7 @@ impl Gpu {
     #[inline(never)]
     fn act<M: GpuMemory>(&mut self, memory: &mut M, renderer: &mut dyn Renderer, register: usize, new: u32) {
         match register {
-            REG_DRAW_ARRAYS | REG_DRAW_ELEMENTS if self.skips() => {
+            REG_DRAW_ARRAYS | REG_DRAW_ELEMENTS if self.skips(memory) => {
                 self.draw_calls += 1;
             }
             REG_DRAW_ARRAYS | REG_DRAW_ELEMENTS => self.draw(memory, renderer, register == REG_DRAW_ELEMENTS),

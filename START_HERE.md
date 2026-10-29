@@ -191,8 +191,9 @@ The menu shows which version you're running, at the top.
 
 A game that ran parts of itself slowly, interpreted, writes down where in
 `title.hints` beside it on the card. Copy the `Pocket Native` folder from
-the card back over the one in the kit's `build` folder before building
-again, and the build makes those parts run at full speed too.
+the card back over the one in the kit's `build` folder, then open `Rebuild
+all games` (`Rebuild all games.bat` on Windows), and the build makes those
+parts run at full speed too. Copy the folder onto the card again after.
 
 ## If something goes wrong
 

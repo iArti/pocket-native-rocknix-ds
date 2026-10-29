@@ -42,6 +42,7 @@ isn't counted against any game here.
 | Fire Emblem: Awakening | Starts | PC | Reaches the avatar maker. If it stutters, try **Frame skip** off in the advanced settings |
 | Fire Emblem Fates | Slow | Reported: Logitech G Cloud (Android), 0.4.0 | US Special Edition. Plays without crashing, battles and cutscenes at 10 to 15 fps. From chapter 2 most character sprites on the map show as grey boxes. Didn't start with **Most compatible** on |
 | Hyrule Warriors Legends | Starts | PC | The opening plays, but it keeps the 3DS's CPU three quarters busy, so expect it to be slow on a handheld |
+| Kid Icarus: Uprising | Starts | PC | Plays into the first chapter. Text in menus and dialogue shows as bars. Crashed a few seconds in on 0.4.5 |
 | Kingdom Hearts 3D: Dream Drop Distance | Slow | PC, R36S sim | The opening plays into Destiny Islands. About 60% speed in the R36S sim |
 | Kirby Battle Royale | Playable | PC, R36S sim | Full speed at 30 fps in the R36S sim, not played on a handheld yet |
 | Kirby: Planet Robobot | Starts | PC | Gets into the first levels. Since 0.4.3 it no longer asks you to accept the Service User Agreement |
@@ -54,7 +55,7 @@ isn't counted against any game here.
 | Metroid Prime: Federation Force | Slow | PC, R36S sim | The opening plays into the training. About 6 fps in the R36S sim, its GPU flat out |
 | Metroid: Samus Returns | Starts | R36S, PC | The intro plays into the game. The black frames between its intro pictures are the game's own fades. About 60% of full speed on the R36S on 0.4.3, against about a third on 0.4.0 |
 | My Hero Academia: Battle for All | Starts | PC, R36S sim | Japanese version. The opening plays into the first tutorial. About 15 fps in the R36S sim |
-| Monster Hunter 4 Ultimate | Slow | Reported: RX6H, 0.2 | 6 fps on the defaults. Its profile now turns on **Real-time GPU**, which a tester found faster |
+| Monster Hunter 4 Ultimate | Slow | PC, reported: RX6H, 0.2 | Starts into Character Creation without errors on the PC. 6 fps on the defaults on 0.2. Its profile now turns on **Real-time GPU**, which a tester found faster |
 | New Super Mario Bros. 2 | Playable | PC, reported: 0.2.5 | Close to fully playable on 0.2.5 (European version). The Special Edition crashed on 0.4.0 when turning SpotPass off, fixed in 0.4.3 |
 | Nintendogs + Cats | Starts | Reported: RG DS (Android), 0.4.3 | The intro runs at about 2 fps |
 | One Piece: Romance Dawn | Playable | Reported: RG DS (Android), 0.4.3 | Graphical glitches in some areas |

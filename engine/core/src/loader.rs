@@ -30,13 +30,12 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
         MemoryType::Base => memory::MemoryRegion::Base,
     };
 
-    // a title marked New3DS-only has to run as one, and one with a New3DS
-    // system mode gets that mode's memory, which only a New 3DS has; a New
-    // 3DS is one all the way through
+    // a title marked New3DS-only has to run as one, one with a New3DS
+    // system mode runs as one with that mode's memory when the player asks,
+    // and the rest as on an Old 3DS, as their linear heap is where an Old
+    // 3DS has it; a New 3DS is one all the way through
     let n3ds_memory = zakuro_fs::n3ds_application_memory(exheader.n3ds_system_mode);
-    if title.ncch.platform() == 2 || n3ds_memory.is_some() {
-        config.new3ds = true;
-    }
+    config.new3ds = title.ncch.platform() == 2 || config.new3ds && n3ds_memory.is_some();
     if config.new3ds {
         config.model = ConsoleModel::New3ds;
     }

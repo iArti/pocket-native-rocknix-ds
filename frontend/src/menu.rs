@@ -63,7 +63,7 @@ const ON_OFF: [&str; 2] = ["Off", "On"];
 /// the advanced settings that turn on and off, see settings::Advanced: the
 /// name, the setting, what off and on show as, and the help under the list.
 #[allow(clippy::type_complexity)]
-const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 32] = [
+const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 33] = [
     ("Bottom screen skipping", |a| &mut a.skip_bottom, ON_OFF, "Draws the bottom screen less often while it stands still. Try Off if it flickers, lags or goes black."),
     ("Speed hacks", |a| &mut a.fast, ON_OFF, "Turns the ten speed hacks below on or off together. Off is the first thing to try when a game looks wrong."),
     ("Quick surface checks", |a| &mut a.quick_checks, ON_OFF, "Checks pictures against memory at a few spots only. Try Off if old pictures or garbage stay after a scene change."),
@@ -96,6 +96,7 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 32] = [
     ("Skip the right eye", |a| &mut a.skip_right_eye, ON_OFF, "Leaves out the right eye's picture, which 2D never shows. Try Off if the top screen flickers or is wrong."),
     ("Draw only shown frames", |a| &mut a.shown_only, ON_OFF, "Leaves out the frames the frame cap never shows, easing the GPU. Try Off if it stutters."),
     ("Compressed alpha textures", |a| &mut a.etc1a4, ON_OFF, "Keeps see-through compressed textures compressed too. Try Off if a game runs slower than on 0.4.0."),
+    ("New 3DS mode", |a| &mut a.new3ds, ON_OFF, "Runs a game that has a New 3DS mode in it, with its extra memory and effects. Slower on most handhelds."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -183,7 +184,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Graphics - requires restart", [toggles(12..=18), vec![Field::Toggle(31)], toggles(19..=22), vec![Field::Toggle(28)]].concat()),
             ("CPU - requires restart", toggles(23..=24)),
             ("Loading - requires restart", toggles(25..=27)),
-            ("System - requires restart", vec![Field::Language, Field::Region]),
+            ("System - requires restart", vec![Field::Language, Field::Region, Field::Toggle(32)]),
             ("", vec![Field::Restart, Field::Compatible, Field::Defaults, Field::Back]),
         ],
     }

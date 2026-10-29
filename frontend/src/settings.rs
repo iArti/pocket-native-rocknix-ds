@@ -265,6 +265,8 @@ pub struct Advanced {
     /// new shaders compiled on a thread of their own, draws going on with
     /// stand-ins meanwhile.
     pub background_shaders: bool,
+    /// a game with a New 3DS mode run as on a New 3DS.
+    pub new3ds: bool,
 }
 
 impl Default for Advanced {
@@ -303,6 +305,7 @@ impl Default for Advanced {
             prewarm: true,
             read_ahead: true,
             background_shaders: true,
+            new3ds: false,
         }
     }
 }

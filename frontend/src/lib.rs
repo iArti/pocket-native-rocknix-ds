@@ -144,6 +144,7 @@ pub fn run(mut args: Vec<String>) {
         data_dir: Some(data.clone()),
         language: game.language,
         region: game.region,
+        new3ds: advanced.new3ds,
         // ZAKURO_RESOLUTION=2.5 over the menu's, for trying one
         resolution: std::env::var("ZAKURO_RESOLUTION").ok().and_then(|v| v.parse().ok()).unwrap_or(settings.resolution),
         // ZAKURO_CLOCK=milliseconds since 1900 starts the clock there, as boot

@@ -27,7 +27,7 @@ if [ $status -ne 0 ]; then
     echo "exit status $status" >> "$data/log.txt"
     dmesg | tail -40 >> "$data/log.txt"
 fi
-"$dir/power.sh" balanced
+"$dir/power.sh" normal
 [ -n "$es" ] && kill -CONT $es
 sudo -n systemctl restart oga_events >/dev/null 2>&1 &
 exit 0

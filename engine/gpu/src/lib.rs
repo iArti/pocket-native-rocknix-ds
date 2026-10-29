@@ -335,6 +335,9 @@ pub struct Gpu {
     bottom_held: bool,
     misfired_at: u64,
     misfires: u8,
+    /// how many bottom pictures in a row the title drew rather than sent
+    /// again, a title drawing it once leaves none of its draws out.
+    bottom_redraws: u8,
     /// the bottom screen drawn with every picture while it changes, not
     /// every other one.
     pub bottom_full_rate: bool,
@@ -440,6 +443,7 @@ impl Gpu {
             bottom_held: false,
             misfired_at: 0,
             misfires: 0,
+            bottom_redraws: 0,
             bottom_full_rate: false,
             #[cfg(feature = "gles")]
             panel: None,
@@ -660,7 +664,7 @@ impl Gpu {
         output_dimensions: u32,
         flags: u32,
     ) {
-        self.drawing = false;
+        let drew = std::mem::replace(&mut self.drawing, false);
         self.twins_settle();
         // a skipped picture never reaches the screens, transfers anywhere
         // else go on, the title may be waiting for what they bring. a
@@ -692,6 +696,13 @@ impl Gpu {
             self.resources.shown_top[0] = input;
         }
         let input_end = input as u64 + (input_dimensions & 0xFFFF) as u64 * (input_dimensions >> 16) as u64 * 4;
+        if shown_on == Some(1) {
+            self.bottom_redraws = if drew && self.screens_drawn & 1 != 0 { self.bottom_redraws.saturating_add(1) } else { 0 };
+            #[cfg(feature = "gles")]
+            {
+                self.resources.redrawn_bottom = (self.bottom_redraws >= 8).then_some((input, input_end as u32));
+            }
+        }
         let from_skipped = self.skipped_targets.iter().any(|&(start, end)| {
             let start_at = memory.translate(start) as u64;
             (input as u64) < start_at + (end - start) as u64 && start_at < input_end

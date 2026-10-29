@@ -42,9 +42,9 @@ pub(super) struct Draw<'a> {
     /// shaded on the CPU only until its own program is built, which needs
     /// no program of its own for those few frames.
     pub(super) stand_in: bool,
-    /// into a picture the top screen shows, drawn again every frame: left
-    /// out while its program builds rather than drawn with the generic one,
-    /// which a handheld's GPU runs too slowly.
+    /// into a picture a screen shows, drawn again every frame: left out while
+    /// its program builds rather than drawn with the generic one, which a
+    /// handheld's GPU runs too slowly.
     pub(super) skippable: bool,
 }
 

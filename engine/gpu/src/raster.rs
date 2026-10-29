@@ -777,6 +777,10 @@ pub struct Resources {
     /// the colour buffers the top screen's last pictures came from.
     #[cfg(feature = "gles")]
     pub(crate) shown_top: [u32; 4],
+    /// what the bottom screen was last shown from, while the title draws it
+    /// again for every picture.
+    #[cfg(feature = "gles")]
+    pub(crate) redrawn_bottom: Option<(u32, u32)>,
 }
 
 /// in fast mode, index buffers and vertex arrays as draws read them, kept
@@ -2162,7 +2166,8 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     let color_buffer_raw = loc_register(registers, REG_COLOR_BUFFER_ADDRESS);
     let target_addr = memory.translate(color_buffer_raw);
     #[cfg(feature = "gles")]
-    let skippable = viewport_height == 400.0 && resources.shown_top.contains(&target_addr);
+    let skippable = viewport_height == 400.0 && resources.shown_top.contains(&target_addr)
+        || viewport_height == 320.0 && resources.redrawn_bottom.is_some_and(|(start, end)| start < target_addr.saturating_add(240 * 320 * 4) && target_addr < end);
     // the format sits in bits 16-18 of the register, not the low bits, the low
     // half holds how many bytes a pixel takes.
     let target_format = ColorFormat::from_color_buffer((registers[REG_COLOR_BUFFER_FORMAT] >> 16) & 7);

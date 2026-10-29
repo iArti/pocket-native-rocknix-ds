@@ -411,6 +411,10 @@ struct Surface {
     /// the journal's stamp when memory was last found to hold the shadow,
     /// and the batch that was in.
     matched: (u64, u64),
+    /// bytes at the end of its memory a transfer into it never writes, which
+    /// another surface has: a texture padded to a wider row whose last
+    /// row's padding runs into the picture copied into it.
+    tail_gap: u32,
 }
 
 static VERSIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -432,7 +436,7 @@ impl Surface {
     }
 
     fn overlaps(&self, addr: u32, len: u32) -> bool {
-        addr < self.addr + self.size() && self.addr < addr + len
+        addr < self.addr + self.size() - self.tail_gap && self.addr < addr + len
     }
 
     fn row_bytes(&self) -> u32 {
@@ -441,7 +445,7 @@ impl Surface {
 
     fn dirty_overlaps(&self, addr: u32, len: u32) -> bool {
         self.dirty.is_some_and(|(start, end)| {
-            let (from, to) = (self.addr + start * self.row_bytes(), self.addr + end * self.row_bytes());
+            let (from, to) = (self.addr + start * self.row_bytes(), (self.addr + end * self.row_bytes()).min(self.addr + self.size() - self.tail_gap));
             addr < to && from < addr + len
         })
     }
@@ -4877,13 +4881,22 @@ impl Gles {
         };
         let input_end = addr as u64 + (input_size.0 * input_size.1 * input_kind.bytes()) as u64;
         let output_end = t.output as u64 + (t.output_width * t.output_height * output_kind.bytes()) as u64;
-        if (addr as u64) < output_end && (t.output as u64) < input_end {
+        // a tiled output wider than the copy has its last row of tiles' end
+        // left as it was, which may be the input's start: Yo-kai Watch 2
+        // copies its 240 wide top screen into a texture 256 wide just before it
+        let gap = if t.output_tiled && t.copy.0 < t.output_width && t.copy.1 == t.output_height { ((t.output_width - t.copy.0) * 8 * output_kind.bytes()) as u64 } else { 0 };
+        if (addr as u64) < output_end - gap && (t.output as u64) < input_end {
             return Ok(false);
         }
+        let tail = ((addr as u64) < output_end && (t.output as u64) < input_end).then_some(gap as u32);
         self.current()?;
         let (source, target) = loop {
             let source = self.surface_rows(memory, addr, input_size, input_kind, tiled, None)?;
-            let target = self.surface_rows(memory, t.output, (t.output_width, t.output_height), output_kind, t.output_tiled, None)?;
+            let rows = tail.map(|_| (0, t.output_height - 8));
+            let target = self.surface_rows(memory, t.output, (t.output_width, t.output_height), output_kind, t.output_tiled, rows)?;
+            if let Some(gap) = tail {
+                self.surfaces[target].tail_gap = gap;
+            }
             if self.surfaces[source].checked && self.surfaces[target].checked {
                 break (source, target);
             }
@@ -5466,6 +5479,7 @@ impl Gles {
                     stale: false,
                     used: self.flushes,
                     matched: (0, 0),
+                    tail_gap: 0,
                 });
                 self.surfaces.len() - 1
             }
@@ -6219,7 +6233,7 @@ impl Gles {
             // buffer may keep its heap there: the rows that would go out are
             // the ones compared
             let (addr, size) = (s.addr, s.size() as usize);
-            let (from, to) = (first as usize * s.row_bytes() as usize, last as usize * s.row_bytes() as usize);
+            let (from, to) = (first as usize * s.row_bytes() as usize, (last as usize * s.row_bytes() as usize).min(size - s.tail_gap as usize));
             let written = s.shadow.len() == size
                 && match memory.slice(addr + from as u32, to - from) {
                     Some(now) => now != &s.shadow[from..to],
@@ -6288,7 +6302,8 @@ impl Gles {
                 }
             }
             let row = s.row_bytes() as usize;
-            memory.write(addr + (first as usize * row) as u32, &bytes[first as usize * row..last as usize * row]);
+            let end = (last as usize * row).min(bytes.len() - s.tail_gap as usize);
+            memory.write(addr + (first as usize * row) as u32, &bytes[first as usize * row..end]);
             // memory holds what was just written, and around it what was there
             if (first, last) != (0, height) {
                 memory.read(addr, &mut bytes);
@@ -7286,6 +7301,39 @@ mod tests {
             // not starting on a tile is the CPU's
             assert!(!gles.texture_copy(&mut memory, source + 16, target, tile_rows, (0, 0), (0, 0)).unwrap());
         }
+    }
+
+    #[test]
+    fn a_copy_into_a_wider_texture_whose_padding_holds_the_drawing_stays_on_the_gpu() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        // Yo-kai Watch 2's top screen, 240x400, into a texture 256 wide that
+        // ends 512 bytes into it
+        let (width, height, padded) = (240u32, 400u32, 256u32);
+        let source = 0x80000u32;
+        let (line, skip) = (8 * width * 4, 8 * (padded - width) * 4);
+        let target = source - (height / 8 * (line + skip) - skip);
+        let size = width * height * 4;
+        let mut memory = Flat(vec![0; 0x100000]);
+        for (i, byte) in memory.0[source as usize..(source + size) as usize].iter_mut().enumerate() {
+            *byte = (i * 37 + i / 5) as u8;
+        }
+        let drawn = memory.0[source as usize..(source + size) as usize].to_vec();
+        let index = gles.surface_rows(&mut memory, source, (width, height), Kind::Color(ColorFormat::Rgba8), true, None).unwrap();
+        gles.surfaces[index].drew((0, height));
+        assert!(gles.texture_copy(&mut memory, source, target, size, (line, 0), (line, skip)).unwrap());
+        assert!(gles.surfaces[index].dirty.is_some(), "the drawing was not read back");
+        gles.flush(&mut memory).unwrap();
+        for row in 0..height / 8 {
+            let at = (target + row * (line + skip)) as usize;
+            assert_eq!(&memory.0[at..at + line as usize], &drawn[(row * line) as usize..((row + 1) * line) as usize], "row of tiles {row}");
+        }
+        assert_eq!(&memory.0[source as usize..(source + size) as usize], &drawn[..], "the drawing under the padding");
     }
 
     #[test]

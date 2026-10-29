@@ -4,7 +4,7 @@ Pocket Native doesn't come with games, and it doesn't play your game
 files directly. Your PC rebuilds each of your 3DS games into a program
 made for your device first. Then:
 
-- on a **Linux handheld** (R36S and friends) you copy what the PC made
+- on a **Linux handheld** (R36S and similar) you copy what the PC made
   onto the SD card
 - on **Android** you install the app and add what the PC made to it
 

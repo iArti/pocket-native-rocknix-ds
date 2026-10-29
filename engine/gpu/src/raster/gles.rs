@@ -6107,6 +6107,10 @@ impl Gles {
                 }
             }
             sim_present(&gl);
+            // with the next picture already waiting this one goes up at
+            // once: held for even pacing, it would hold up the title, which
+            // then skips frames and stays behind, Pokémon X at 16 fps
+            let frames = if presenting.load(std::sync::atomic::Ordering::Acquire) >= 2 { 1 } else { frames };
             if let Err(error) = show(gl, parts, frames) {
                 log::error!("could not show the screens, {error}");
             }

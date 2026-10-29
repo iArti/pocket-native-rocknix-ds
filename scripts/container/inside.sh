@@ -53,6 +53,15 @@ cargo build --release --locked -p recomp3ds --bin 3dsrecomp
 cargo build --release --locked --target aarch64-unknown-linux-gnu -p pocket-native
 
 echo "== recompiling the game for the handheld"
+# where the handheld had to interpret, which it writes beside the game on
+# the card, comes back with the card's folder and is recompiled too
+hints="$HOME/.local/share/3dsrecomp/$id.hints"
+rm -f "$hints"
+if [ -s "/out/Pocket Native/pocket-native/games/$id/title.hints" ]; then
+    mkdir -p "$(dirname "$hints")"
+    cp "/out/Pocket Native/pocket-native/games/$id/title.hints" "$hints"
+    echo "== with $(wc -l < "$hints") places the handheld interpreted"
+fi
 overrides=()
 [ -d "titles/$id/overrides" ] && overrides=(--overrides "titles/$id/overrides")
 RECOMP_CFLAGS=-DRECOMP_FASTMEM CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/release/3dsrecomp" build "$game" "/work/recomp/$id" "${overrides[@]}"

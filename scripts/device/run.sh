@@ -40,7 +40,7 @@ if [ $status -ne 0 ]; then
     echo "exit status $status" >> "$data/log.txt"
     dmesg | tail -40 >> "$data/log.txt"
 fi
-"$dir/power.sh" balanced
+"$dir/power.sh" normal
 if [ -n "$vt" ]; then
     chvt "$vt"
     # sway's libinput finds its devices again only once one changes

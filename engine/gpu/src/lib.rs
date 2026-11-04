@@ -367,6 +367,10 @@ pub struct Gpu {
     /// to the top screen shows was wrong, turning that skipping off for the
     /// title.
     period_target: u32,
+    /// the end of the period's color buffer as transfers name it, which a
+    /// transfer of part of it, as Metal Gear Solid Snake Eater's rows past
+    /// the first 112 of each eye's, still comes from.
+    period_end: u32,
     skipped_bottom: bool,
     /// the color buffer the last picture the bottom screen showed came from:
     /// only draws into it are left out as the bottom screen's, a pass of the
@@ -462,6 +466,7 @@ impl Gpu {
             right_eye_seen: 0,
             right_eye_short: 0,
             period_target: 0,
+            period_end: 0,
             skipped_bottom: false,
             bottom_from: None,
             right_eye_wrong: false,
@@ -725,12 +730,15 @@ impl Gpu {
         }
         if let Some((0, buffer)) = reached {
             let right = self.right_buffers.contains(&buffer);
-            let drawn_here = memory.translate(self.period_target) == input;
+            let drawn_here = (memory.translate(self.period_target)..self.period_end).contains(&input);
             if self.right_eye_candidate && drawn_here {
                 if !right {
                     self.right_eye_off("a picture taken for the right eye's went to the left");
                 } else if self.screens_drawn == 2 {
                     self.right_eye_seen = self.right_eye_seen.saturating_add(1);
+                    if self.right_eye_seen == 4 {
+                        log::info!("right eye skipping on, the title draws both eyes");
+                    }
                 }
             }
             if right {
@@ -1437,6 +1445,14 @@ impl Gpu {
         self.most_skipped = most;
     }
 
+    /// where a color buffer of the framebuffer's dimensions lies, as
+    /// transfers name it.
+    fn drawn_range<M: GpuMemory>(&self, memory: &M, target: u32) -> (u32, u32) {
+        let dimensions = self.internal[REG_FRAMEBUFFER_DIMENSIONS];
+        let start = memory.translate(target);
+        (start, start.saturating_add((dimensions & 0x7FF) * (((dimensions >> 12) & 0x3FF) + 1) * 4))
+    }
+
     fn right_eye_off(&mut self, why: &str) {
         if self.right_eye_wrong {
             return;
@@ -1480,15 +1496,15 @@ impl Gpu {
                 self.left_eye = None;
             }
             self.period_target = target;
-            let dimensions = self.internal[REG_FRAMEBUFFER_DIMENSIONS];
-            let drawn = memory.translate(target);
-            let drawn = (drawn, drawn.saturating_add((dimensions & 0x7FF) * (((dimensions >> 12) & 0x3FF) + 1) * 4));
+            let drawn = self.drawn_range(memory, target);
+            self.period_end = drawn.1;
             self.skipped_bottom = screen == 1 && self.bottom_from.is_some_and(|(start, end)| drawn.0 < end && start < drawn.1) && self.skips_bottom();
             self.skipping = skip_draws || right_eye || self.skipped_bottom;
             self.skipped_targets.clear();
         } else if self.screens_drawn | screen != self.screens_drawn {
             if self.screens_drawn == 0 && screen == 2 {
                 self.period_target = self.internal[REG_COLOR_BUFFER_ADDRESS] << 3;
+                self.period_end = self.drawn_range(memory, self.period_target).1;
             }
             self.screens_drawn |= screen;
             if self.screens_drawn == 3 {

@@ -615,6 +615,15 @@ struct Resident {
     buffers: rustc_hash::FxHashMap<(usize, usize), (glow::Buffer, Arc<[u8]>, u64)>,
     bytes: usize,
     draws: u64,
+    /// the arrays by the draw that last used them, oldest first, an entry
+    /// left behind once the array was used again or went: the oldest found
+    /// without looking through them all, which with the cache full every
+    /// new array did, a third of Terraria's GL thread.
+    order: std::collections::VecDeque<((usize, usize), u64)>,
+    /// arrays one draw used that have no buffer, by the draw: the next draw
+    /// to use one gives it its own. Held weakly, so that a new array is not
+    /// taken for one gone that had its place.
+    seen: rustc_hash::FxHashMap<(usize, usize), (std::sync::Weak<[u8]>, u64)>,
 }
 
 /// how many bytes of arrays stay on the GPU before the oldest go, each
@@ -633,19 +642,55 @@ fn resident_cost(len: usize) -> usize {
 }
 
 impl Resident {
+    /// whether no draw before this one used the array, which then goes
+    /// through the ring as a draw's own arrays do rather than into a buffer
+    /// of its own: Terraria's sprites are new arrays every draw, and a
+    /// buffer made, filled and deleted for each held up its GL thread.
+    fn fresh(&mut self, array: &Arc<[u8]>) -> bool {
+        let key = (Arc::as_ptr(array) as *const u8 as usize, array.len());
+        if self.buffers.contains_key(&key) {
+            return false;
+        }
+        let draws = self.draws;
+        if let Some((_, first)) = self.seen.get(&key) {
+            // the same array, as one gone keeps its place while held
+            if *first == draws {
+                return true;
+            }
+            self.seen.remove(&key);
+            return false;
+        }
+        if self.seen.len() >= RESIDENT_ARRAYS {
+            self.seen.clear();
+        }
+        self.seen.insert(key, (Arc::downgrade(array), draws));
+        true
+    }
+
     fn buffer(&mut self, gl: &glow::Context, array: &Arc<[u8]>) -> Result<glow::Buffer, String> {
         let key = (Arc::as_ptr(array) as *const u8 as usize, array.len());
         let draws = self.draws;
         if let Some((buffer, _, used)) = self.buffers.get_mut(&key) {
-            *used = draws;
-            return Ok(*buffer);
+            let buffer = *buffer;
+            if *used != draws {
+                *used = draws;
+                self.used(key);
+            }
+            return Ok(buffer);
         }
         let cost = resident_cost(array.len());
         // the array no draw used for longest goes, one for each new one once
         // full rather than many in one draw, and never one the draw being
         // made already took
         while self.bytes + cost > RESIDENT_BYTES || self.buffers.len() >= RESIDENT_ARRAYS {
-            let Some(oldest) = self.buffers.iter().filter(|(_, (_, _, used))| *used != draws).min_by_key(|(_, (_, _, used))| *used).map(|(&key, _)| key) else { break };
+            let Some((oldest, stamp)) = self.order.pop_front() else { break };
+            if self.buffers.get(&oldest).is_none_or(|(_, _, used)| *used != stamp) {
+                continue;
+            }
+            if stamp == draws {
+                self.order.push_front((oldest, stamp));
+                break;
+            }
             let (buffer, array, _) = self.buffers.remove(&oldest).expect("an array just found");
             self.bytes -= resident_cost(array.len());
             // SAFETY: on the GL thread, the draws that read it were issued
@@ -660,7 +705,20 @@ impl Resident {
         };
         self.bytes += cost;
         self.buffers.insert(key, (buffer, array.clone(), draws));
+        self.seen.remove(&key);
+        self.used(key);
         Ok(buffer)
+    }
+
+    /// notes the draw an array was used by, the entries left behind thrown
+    /// out once they are most of the order.
+    fn used(&mut self, key: (usize, usize)) {
+        self.order.push_back((key, self.draws));
+        if self.order.len() > self.buffers.len() * 4 + 256 {
+            let mut order: Vec<((usize, usize), u64)> = self.buffers.iter().map(|(&key, &(_, _, used))| (key, used)).collect();
+            order.sort_unstable_by_key(|&(_, used)| used);
+            self.order = order.into();
+        }
     }
 }
 
@@ -968,15 +1026,29 @@ impl DrawJob {
                                 // the vertex array still has them
                                 let key: Vec<usize> = arrays.iter().map(|array| Arc::as_ptr(array) as *const u8 as usize).collect();
                                 if !local.cache.resident.as_ref().is_some_and(|(last, read)| *last == key && *read == slots) {
-                                    let buffers = arrays.iter().map(|array| local.resident.buffer(&gl, array)).collect::<Result<Vec<_>, String>>()?;
+                                    // an array no draw before used goes through
+                                    // the ring, one drawn again into its own buffer
+                                    let mut streamed = false;
+                                    let mut buffers = Vec::with_capacity(arrays.len());
+                                    for array in &arrays {
+                                        if local.resident.fresh(array) {
+                                            if let Ok(at) = local.inputs.push_aligned(&gl, glow::ARRAY_BUFFER, array, 16) {
+                                                buffers.push((local.inputs.buffer, at));
+                                                streamed = true;
+                                                continue;
+                                            }
+                                        }
+                                        buffers.push((local.resident.buffer(&gl, array)?, 0));
+                                    }
                                     for (slot, (array, attribute)) in slots.iter().enumerate() {
                                         let slot = slot as u32;
                                         match *attribute {
                                             Attribute::Array { offset, ty, count, stride } => {
                                                 let kind = [glow::BYTE, glow::UNSIGNED_BYTE, glow::SHORT, glow::FLOAT][(ty & 3) as usize];
-                                                gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffers[*array]));
+                                                let (buffer, at) = buffers[*array];
+                                                gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
                                                 gl.enable_vertex_attrib_array(slot);
-                                                gl.vertex_attrib_pointer_f32(slot, count as i32, kind, false, stride as i32, offset as i32);
+                                                gl.vertex_attrib_pointer_f32(slot, count as i32, kind, false, stride as i32, (at + offset) as i32);
                                             }
                                             Attribute::Constant(value) => {
                                                 gl.disable_vertex_attrib_array(slot);
@@ -988,7 +1060,8 @@ impl DrawJob {
                                         gl.disable_vertex_attrib_array(slot);
                                     }
                                     local.cache.stride = None;
-                                    local.cache.resident = Some((key, slots));
+                                    // streamed arrays are somewhere else in the ring next time
+                                    local.cache.resident = (!streamed).then_some((key, slots));
                                 }
                                 0
                             }
@@ -1014,9 +1087,16 @@ impl DrawJob {
                         // a mesh's indices stay on the GPU, others go through the ring
                         let (index_offset, kind) = match &resident_indices {
                             Some(bytes) => {
-                                let buffer = local.resident.buffer(&gl, bytes)?;
-                                gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(buffer));
-                                (0, if bytes.len() == count as usize * 2 { glow::UNSIGNED_SHORT } else { glow::UNSIGNED_INT })
+                                let kind = if bytes.len() == count as usize * 2 { glow::UNSIGNED_SHORT } else { glow::UNSIGNED_INT };
+                                // new indices through the ring too
+                                match local.resident.fresh(bytes).then(|| local.indices.push(&gl, glow::ELEMENT_ARRAY_BUFFER, bytes)).and_then(Result::ok) {
+                                    Some(offset) => (offset, kind),
+                                    None => {
+                                        let buffer = local.resident.buffer(&gl, bytes)?;
+                                        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(buffer));
+                                        (0, kind)
+                                    }
+                                }
                             }
                             None => {
                                 let kind = if indices.len() == count as usize * 2 { glow::UNSIGNED_SHORT } else { glow::UNSIGNED_INT };
@@ -3726,6 +3806,7 @@ impl Gles {
                     unsafe { gl.delete_buffer(buffer) };
                 }
                 local.resident.bytes = 0;
+                (local.resident.order, local.resident.seen) = Default::default();
                 (local.cache.resident, local.cache.stride) = (None, None);
             });
             // SAFETY: on the GL thread, after every draw that used them, the
@@ -4691,6 +4772,27 @@ impl Gles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// an array goes through the ring the draw it is new, and gets a buffer
+    /// of its own from the next draw that uses it; one gone is not taken for
+    /// a new one in its place.
+    #[test]
+    fn an_array_gets_a_buffer_once_drawn_again() {
+        let mut resident = Resident::default();
+        let array: Arc<[u8]> = vec![1u8; 64].into();
+        resident.draws = 1;
+        assert!(resident.fresh(&array));
+        assert!(resident.fresh(&array), "twice in one draw is still new");
+        resident.draws = 2;
+        assert!(!resident.fresh(&array), "drawn again");
+        resident.draws = 3;
+        let gone: Arc<[u8]> = vec![2u8; 64].into();
+        assert!(resident.fresh(&gone));
+        drop(gone);
+        resident.draws = 4;
+        let new: Arc<[u8]> = vec![3u8; 64].into();
+        assert!(resident.fresh(&new));
+    }
 
     /// guest memory as one flat block from address zero.
     struct Flat(Vec<u8>);

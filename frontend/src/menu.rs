@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use crate::font::{rgba, Canvas};
-use crate::input::{A, B, DOWN, LEFT, RIGHT, UP, X, Y};
+use crate::input::{A, B, DOWN, LEFT, RIGHT, UP, Y};
 use crate::profile::Profile;
 use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
@@ -479,8 +479,7 @@ impl Menu {
         self.held = if direction.is_some_and(|key| self.last.contains(&key)) { self.held + 1 } else { 0 };
         let repeat = self.held == 0 || (self.held >= 18 && self.held.is_multiple_of(5));
         let pressed = |key: u16| keys.contains(&key) && !self.last.contains(&key);
-        // X does what Y does: a pad with no letters on it has Xbox's Y on top
-        let (a, b, y) = (pressed(A), pressed(B), pressed(Y) || pressed(X));
+        let (a, b, y) = (pressed(A), pressed(B), pressed(Y));
         self.last = keys.clone();
         let fields: Vec<Field> = sections(self.page, profile).into_iter().flat_map(|(_, fields)| fields).collect();
         self.cursor = self.cursor.min(fields.len() - 1);
@@ -836,18 +835,6 @@ mod tests {
         // the name's and the value's letters, four corners each
         let letters = "Aspect ratio".len() + "Original".len();
         assert!((4 * (letters - 2)..=4 * letters).contains(&colored(&game)), "{}", colored(&game));
-    }
-
-    /// X makes a setting the game's own too.
-    #[test]
-    fn x_does_what_y_does() {
-        let profile = Profile::default();
-        let (mut menu, mut game) = (Menu::default(), GameSettings::default());
-        let mut shared = Settings::default();
-        let mut settings = shared.clone();
-        menu.show();
-        menu.input(&[X].into_iter().collect(), &mut settings, &mut shared, &mut game, &profile);
-        assert!(Field::Layout.own(&game));
     }
 
     /// the footer's two sides fit beside each other, Y's way named too.

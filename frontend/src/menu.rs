@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use crate::font::{rgba, Canvas};
-use crate::input::{A, B, DOWN, LEFT, RIGHT, UP, Y};
+use crate::input::{A, B, DOWN, LEFT, RIGHT, UP, X, Y};
 use crate::profile::Profile;
 use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
@@ -17,8 +17,9 @@ const TEXT: [u8; 3] = [230, 238, 248];
 const DIM: [u8; 3] = [130, 152, 182];
 const ACCENT: [u8; 3] = [90, 170, 255];
 const WARNING: [u8; 3] = [255, 196, 90];
-/// a setting's name when the game keeps it its own.
-const OWN: [u8; 3] = [130, 226, 160];
+/// a setting's row, its name and its value, when the game keeps it its own,
+/// as a confirmation's is WARNING.
+const OWN: [u8; 3] = [96, 230, 110];
 /// the face sizes in the font, the list's and the small one.
 const BIG: usize = 0;
 const SMALL: usize = 1;
@@ -478,7 +479,8 @@ impl Menu {
         self.held = if direction.is_some_and(|key| self.last.contains(&key)) { self.held + 1 } else { 0 };
         let repeat = self.held == 0 || (self.held >= 18 && self.held.is_multiple_of(5));
         let pressed = |key: u16| keys.contains(&key) && !self.last.contains(&key);
-        let (a, b, y) = (pressed(A), pressed(B), pressed(Y));
+        // X does what Y does: a pad with no letters on it has Xbox's Y on top
+        let (a, b, y) = (pressed(A), pressed(B), pressed(Y) || pressed(X));
         self.last = keys.clone();
         let fields: Vec<Field> = sections(self.page, profile).into_iter().flat_map(|(_, fields)| fields).collect();
         self.cursor = self.cursor.min(fields.len() - 1);
@@ -498,6 +500,7 @@ impl Menu {
         if y && !field.keys().is_empty() {
             let mine = !field.own(game);
             settings.make_own(shared, &mut game.own, field.keys(), mine);
+            log::info!("{} {}", field.keys().join(" and "), if mine { "made this game's own" } else { "every game's again" });
             self.confirm = None;
             return Action::Changed;
         }
@@ -617,9 +620,10 @@ impl Menu {
                 canvas.text(BIG, ask, x0 + 22.0, y, rgba(WARNING, 255), false);
                 canvas.text(SMALL, "A again", x1 - 18.0, y + 2.0, rgba(WARNING, 255), true);
             } else {
-                canvas.text(BIG, &name, x0 + 22.0, y, rgba(if field.own(game) { OWN } else { TEXT }, 255), false);
+                let own = field.own(game);
+                canvas.text(BIG, &name, x0 + 22.0, y, rgba(if own { OWN } else { TEXT }, 255), false);
                 let value = if selected && field == Field::Layout { format!("<  {value}  >") } else { value };
-                canvas.text(BIG, &value, x1 - 18.0, y, rgba(if selected { TEXT } else { ACCENT }, 255), true);
+                canvas.text(BIG, &value, x1 - 18.0, y, rgba(if own { OWN } else if selected { TEXT } else { ACCENT }, 255), true);
             }
         }
         canvas.fill([x0 + 10.0, help_top, x1 - 10.0, help_top + 1.0], rgba([32, 48, 72], 255));
@@ -809,6 +813,41 @@ mod tests {
         press(&[Y], &mut menu, &mut settings, &mut shared, &mut game);
         assert!(!Field::Resolution.own(&game) && game.own.is_empty());
         assert_eq!(settings.resolution, 1.5);
+    }
+
+    /// a game's own setting's row is drawn in OWN, name and value, and the
+    /// others not.
+    #[test]
+    fn an_own_setting_is_drawn_green() {
+        let font = Font::load();
+        let profile = Profile::default();
+        let settings = Settings::default();
+        let colored = |game: &GameSettings| {
+            let mut canvas = Canvas::new(&font, (640, 480));
+            let mut menu = Menu::default();
+            menu.show();
+            menu.draw(&mut canvas, &settings, game, &profile, "Game");
+            let overlay = canvas.finish();
+            overlay.meshes.iter().flat_map(|mesh| &mesh.vertices).filter(|vertex| vertex.color == rgba(OWN, 255)).count()
+        };
+        let mut game = GameSettings::default();
+        assert_eq!(colored(&game), 0);
+        game.own.insert("aspect".into(), toml::Value::String("Crop".into()));
+        // the name's and the value's letters, four corners each
+        let letters = "Aspect ratio".len() + "Original".len();
+        assert!((4 * (letters - 2)..=4 * letters).contains(&colored(&game)), "{}", colored(&game));
+    }
+
+    /// X makes a setting the game's own too.
+    #[test]
+    fn x_does_what_y_does() {
+        let profile = Profile::default();
+        let (mut menu, mut game) = (Menu::default(), GameSettings::default());
+        let mut shared = Settings::default();
+        let mut settings = shared.clone();
+        menu.show();
+        menu.input(&[X].into_iter().collect(), &mut settings, &mut shared, &mut game, &profile);
+        assert!(Field::Layout.own(&game));
     }
 
     /// the footer's two sides fit beside each other, Y's way named too.

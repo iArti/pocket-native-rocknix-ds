@@ -127,7 +127,19 @@ pub fn run(mut args: Vec<String>) {
     let advanced = Advanced::of(&game, &profile);
     advanced.export();
     let settings_path = settings::config_dir().join("settings.toml");
-    let mut settings: Settings = settings::load(&settings_path);
+    // every game's settings, and what the menu shows and the game goes by,
+    // the ones this game keeps its own over them
+    let mut shared: Settings = settings::load(&settings_path);
+    let mut settings = shared.with_own(&game.own);
+    if !game.own.is_empty() {
+        log::info!("this game's own settings: {}", game.own.keys().cloned().collect::<Vec<_>>().join(", "));
+    }
+    // both files, the settings this game keeps its own in its
+    let save = |settings: &Settings, shared: &mut Settings, game: &mut GameSettings| {
+        *shared = settings.split(shared, &mut game.own);
+        settings::save(&settings_path, &*shared);
+        settings::save(&game_path, &*game);
+    };
     // the menu's rotation over ZAKURO_PANEL_ROTATE, before the panel starts
     let rotate = match settings.rotation {
         Rotation::Auto => None,
@@ -342,7 +354,7 @@ pub fn run(mut args: Vec<String>) {
                 menu.open = false;
                 Action::Resume
             } else {
-                menu.input(&keys, &mut settings, &mut game, &profile)
+                menu.input(&keys, &mut settings, &mut shared, &mut game, &profile)
             };
             held = keys.clone();
             match action {
@@ -356,8 +368,7 @@ pub fn run(mut args: Vec<String>) {
                     menu_drawn = false;
                 }
                 Action::Resume => {
-                    settings::save(&settings_path, &settings);
-                    settings::save(&game_path, &game);
+                    save(&settings, &mut shared, &mut game);
                     (overlay, status, next) = (None, None, Instant::now());
                 }
                 Action::Reset => {
@@ -365,7 +376,7 @@ pub fn run(mut args: Vec<String>) {
                     break;
                 }
                 Action::EditControls => {
-                    settings::save(&settings_path, &settings);
+                    save(&settings, &mut shared, &mut game);
                     (overlay, status) = (None, None);
                     controls.start_editing();
                     continue;
@@ -636,8 +647,7 @@ pub fn run(mut args: Vec<String>) {
         system.stop_gpu();
         std::process::exit(code);
     }
-    settings::save(&settings_path, &settings);
-    settings::save(&game_path, &game);
+    save(&settings, &mut shared, &mut game);
     system.stop_gpu();
     if let Some(before) = BEFORE_EXIT.get() {
         before(exit_code);

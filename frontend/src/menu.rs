@@ -1,10 +1,11 @@
 //! the menu a tap of FN opens: the game pauses under it, the d-pad moves and
-//! changes, A picks, B or FN goes back to the game.
+//! changes, A picks, B or FN goes back to the game, Y makes a setting this
+//! game's own or every game's again.
 
 use std::collections::HashSet;
 
 use crate::font::{rgba, Canvas};
-use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
+use crate::input::{A, B, DOWN, LEFT, RIGHT, UP, Y};
 use crate::profile::Profile;
 use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
@@ -16,6 +17,8 @@ const TEXT: [u8; 3] = [230, 238, 248];
 const DIM: [u8; 3] = [130, 152, 182];
 const ACCENT: [u8; 3] = [90, 170, 255];
 const WARNING: [u8; 3] = [255, 196, 90];
+/// a setting's name when the game keeps it its own.
+const OWN: [u8; 3] = [130, 226, 160];
 /// the face sizes in the font, the list's and the small one.
 const BIG: usize = 0;
 const SMALL: usize = 1;
@@ -109,6 +112,39 @@ enum Page {
 }
 
 impl Field {
+    /// the settings every game shares a field sets, by their names in
+    /// settings.toml, which Y makes this game's own: none for the rest.
+    fn keys(self) -> &'static [&'static str] {
+        match self {
+            Field::Layout => &["layout", "swapped"],
+            Field::Aspect => &["aspect"],
+            Field::Resolution => &["resolution"],
+            Field::Smooth => &["smooth"],
+            Field::Stretch => &["stretched"],
+            Field::Interpolate => &["interpolate_to"],
+            Field::ShowFps => &["show_fps"],
+            Field::ShowClock => &["show_clock"],
+            Field::Rotation => &["rotation"],
+            Field::FrameCap => &["frame_cap"],
+            Field::Power => &["power"],
+            Field::TouchSpeed => &["touch_speed"],
+            Field::Cursor => &["cursor"],
+            Field::Buttons => &["buttons"],
+            Field::LeftStick => &["left_stick"],
+            Field::Dpad => &["dpad"],
+            Field::RightStick => &["right_stick"],
+            Field::ReverseTiltX => &["reverse_tilt_x"],
+            Field::ReverseTiltY => &["reverse_tilt_y"],
+            Field::TouchControls => &["touch_controls"],
+            _ => &[],
+        }
+    }
+
+    /// whether the game keeps this field's settings its own.
+    fn own(self, game: &GameSettings) -> bool {
+        self.keys().first().is_some_and(|key| game.own.contains_key(*key))
+    }
+
     /// picked with A rather than changed with left and right.
     fn action(self) -> bool {
         matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back | Field::EditControls)
@@ -385,6 +421,15 @@ fn help(field: Field, profile: &Profile) -> &str {
     }
 }
 
+/// the keys the footer names, at its left and right: Y with a setting the
+/// game can keep its own, saying which way it goes.
+fn footer(field: Option<Field>, game: &GameSettings) -> (&'static str, &'static str) {
+    match field {
+        Some(field) if !field.keys().is_empty() => ("A  select   B  back", if field.own(game) { "Y  every game   ←→  change" } else { "Y  this game   ←→  change" }),
+        _ => ("A  select    B  back", "Left/right  change"),
+    }
+}
+
 /// text cut short with "..." to be no wider than width.
 fn shortened(canvas: &Canvas, face: usize, text: &str, width: f32) -> String {
     let mut text = text.to_owned();
@@ -426,12 +471,14 @@ impl Menu {
     }
 
     /// the keys held this frame, d-pad presses repeating while held.
-    pub fn input(&mut self, keys: &HashSet<u16>, settings: &mut Settings, game: &mut GameSettings, profile: &Profile) -> Action {
+    /// settings is what the menu shows, every game's with this one's own
+    /// over them, shared every game's.
+    pub fn input(&mut self, keys: &HashSet<u16>, settings: &mut Settings, shared: &mut Settings, game: &mut GameSettings, profile: &Profile) -> Action {
         let direction = [UP, DOWN, LEFT, RIGHT].into_iter().find(|key| keys.contains(key));
         self.held = if direction.is_some_and(|key| self.last.contains(&key)) { self.held + 1 } else { 0 };
         let repeat = self.held == 0 || (self.held >= 18 && self.held.is_multiple_of(5));
         let pressed = |key: u16| keys.contains(&key) && !self.last.contains(&key);
-        let (a, b) = (pressed(A), pressed(B));
+        let (a, b, y) = (pressed(A), pressed(B), pressed(Y));
         self.last = keys.clone();
         let fields: Vec<Field> = sections(self.page, profile).into_iter().flat_map(|(_, fields)| fields).collect();
         self.cursor = self.cursor.min(fields.len() - 1);
@@ -447,6 +494,12 @@ impl Menu {
                 return Action::Changed;
             }
             _ => {}
+        }
+        if y && !field.keys().is_empty() {
+            let mine = !field.own(game);
+            settings.make_own(shared, &mut game.own, field.keys(), mine);
+            self.confirm = None;
+            return Action::Changed;
         }
         if b {
             if self.confirm.take().is_some() {
@@ -564,7 +617,7 @@ impl Menu {
                 canvas.text(BIG, ask, x0 + 22.0, y, rgba(WARNING, 255), false);
                 canvas.text(SMALL, "A again", x1 - 18.0, y + 2.0, rgba(WARNING, 255), true);
             } else {
-                canvas.text(BIG, &name, x0 + 22.0, y, rgba(TEXT, 255), false);
+                canvas.text(BIG, &name, x0 + 22.0, y, rgba(if field.own(game) { OWN } else { TEXT }, 255), false);
                 let value = if selected && field == Field::Layout { format!("<  {value}  >") } else { value };
                 canvas.text(BIG, &value, x1 - 18.0, y, rgba(if selected { TEXT } else { ACCENT }, 255), true);
             }
@@ -578,8 +631,9 @@ impl Menu {
             }
         }
         canvas.fill([x0 + 10.0, y1 - 27.0, x1 - 10.0, y1 - 26.0], rgba([32, 48, 72], 255));
-        canvas.text(SMALL, "A  select    B  back", x0 + 14.0, y1 - 21.0, rgba(DIM, 255), false);
-        canvas.text(SMALL, "Left/right  change", x1 - 14.0, y1 - 21.0, rgba(DIM, 255), true);
+        let (keys, change) = footer(fields.get(self.cursor).copied(), game);
+        canvas.text(SMALL, keys, x0 + 14.0, y1 - 21.0, rgba(DIM, 255), false);
+        canvas.text(SMALL, change, x1 - 14.0, y1 - 21.0, rgba(DIM, 255), true);
     }
 }
 
@@ -714,6 +768,63 @@ mod tests {
         for index in 0..TOGGLES.len() {
             let count = fields.iter().filter(|&&field| field == Field::Toggle(index)).count();
             assert_eq!(count, 1, "{} is in the advanced settings {count} times", TOGGLES[index].0);
+        }
+    }
+
+    /// every setting every game shares has a field that makes it a game's
+    /// own, and every field's names are settings.
+    #[test]
+    fn every_shared_setting_can_be_a_games_own() {
+        let names: Vec<String> = toml::Table::try_from(Settings::default()).unwrap().keys().cloned().collect();
+        let fields: Vec<Field> = sections(Page::Main, &Profile::default()).into_iter().flat_map(|(_, fields)| fields).collect();
+        let keys: Vec<&str> = [Field::Stretch, Field::Rotation, Field::Power, Field::TouchControls].into_iter().chain(fields).flat_map(|field| field.keys().iter().copied()).collect();
+        for name in &names {
+            assert!(keys.contains(&name.as_str()), "{name} has no field to make it a game's own");
+        }
+        for key in keys {
+            assert!(names.iter().any(|name| name == key), "{key} is not a setting");
+        }
+    }
+
+    /// Y makes the field a game's own, shown in its color, and again every
+    /// game's, what it was for every game coming back.
+    #[test]
+    fn y_makes_a_setting_the_games_own_and_back() {
+        let profile = Profile::default();
+        let (mut menu, mut game) = (Menu::default(), GameSettings::default());
+        let mut shared = Settings { resolution: 1.5, ..Settings::default() };
+        let mut settings = shared.with_own(&game.own);
+        menu.show();
+        let fields: Vec<Field> = sections(Page::Main, &profile).into_iter().flat_map(|(_, fields)| fields).collect();
+        menu.cursor = fields.iter().position(|&field| field == Field::Resolution).unwrap();
+        let press = |keys: &[u16], menu: &mut Menu, settings: &mut Settings, shared: &mut Settings, game: &mut GameSettings| {
+            menu.input(&keys.iter().copied().collect(), settings, shared, game, &profile);
+            menu.input(&HashSet::new(), settings, shared, game, &profile);
+        };
+        press(&[Y], &mut menu, &mut settings, &mut shared, &mut game);
+        assert!(Field::Resolution.own(&game));
+        press(&[RIGHT], &mut menu, &mut settings, &mut shared, &mut game);
+        assert_eq!((settings.resolution, settings.split(&shared, &mut game.own).resolution), (1.75, 1.5));
+        assert_eq!(game.own["resolution"], toml::Value::Float(1.75));
+        press(&[Y], &mut menu, &mut settings, &mut shared, &mut game);
+        assert!(!Field::Resolution.own(&game) && game.own.is_empty());
+        assert_eq!(settings.resolution, 1.5);
+    }
+
+    /// the footer's two sides fit beside each other, Y's way named too.
+    #[test]
+    fn the_footer_fits() {
+        let font = Font::load();
+        let canvas = Canvas::new(&font, (640, 480));
+        let mut game = GameSettings::default();
+        for own in [false, true] {
+            if own {
+                game.own.insert("aspect".into(), toml::Value::String("Crop".into()));
+            }
+            for field in [Some(Field::Aspect), Some(Field::Resume), None] {
+                let (left, right) = footer(field, &game);
+                assert!(canvas.measure(SMALL, left) + canvas.measure(SMALL, right) + 24.0 <= 400.0 - 28.0, "{left} | {right}");
+            }
         }
     }
 

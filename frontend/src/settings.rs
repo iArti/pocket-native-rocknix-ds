@@ -203,8 +203,67 @@ impl Default for Settings {
     }
 }
 
-/// a game's options by name, on or off, and its advanced settings when the
-/// player changed them.
+/// the settings a game keeps its own, by their names in settings.toml, with
+/// the game's values.
+pub type Own = BTreeMap<String, toml::Value>;
+
+impl Settings {
+    /// these settings, every game's, with a game's own over them. An own
+    /// value that is not one of these settings, or not of its kind, is left
+    /// out.
+    pub fn with_own(&self, own: &Own) -> Settings {
+        let Ok(mut table) = toml::Table::try_from(self) else { return self.clone() };
+        for (key, value) in own {
+            if !table.contains_key(key) {
+                continue;
+            }
+            let before = table.insert(key.clone(), value.clone());
+            if table.clone().try_into::<Settings>().is_err() {
+                log::warn!("this game's own {key} is not one the menu has, left out");
+                if let Some(before) = before {
+                    table.insert(key.clone(), before);
+                }
+            }
+        }
+        table.try_into().unwrap_or_else(|_| self.clone())
+    }
+
+    /// every game's settings back out of these, the ones the menu shows: a
+    /// setting the game keeps its own goes into own, the rest over shared.
+    pub fn split(&self, shared: &Settings, own: &mut Own) -> Settings {
+        let (Ok(shown), Ok(mut table)) = (toml::Table::try_from(self), toml::Table::try_from(shared)) else { return shared.clone() };
+        for (key, value) in shown {
+            match own.get_mut(&key) {
+                Some(kept) => *kept = value,
+                None => {
+                    table.insert(key, value);
+                }
+            }
+        }
+        table.try_into().unwrap_or_else(|_| shared.clone())
+    }
+
+    /// makes the settings named this game's own, from what they are now, or
+    /// every game's again, back to what every game has.
+    pub fn make_own(&mut self, shared: &mut Settings, own: &mut Own, keys: &[&str], mine: bool) {
+        *shared = self.split(shared, own);
+        let Ok(shown) = toml::Table::try_from(&*self) else { return };
+        for &key in keys {
+            match (mine, shown.get(key)) {
+                (true, Some(value)) => {
+                    own.insert(key.to_owned(), value.clone());
+                }
+                _ => {
+                    own.remove(key);
+                }
+            }
+        }
+        *self = shared.with_own(own);
+    }
+}
+
+/// a game's options by name, on or off, its advanced settings when the
+/// player changed them, and the menu's settings it keeps its own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GameSettings {
@@ -214,11 +273,14 @@ pub struct GameSettings {
     pub region: u8,
     pub options: BTreeMap<String, bool>,
     pub advanced: Option<Advanced>,
+    /// the settings every game shares that this one keeps its own, Y in the
+    /// menu: its resolution, layout or scaling, say.
+    pub own: Own,
 }
 
 impl Default for GameSettings {
     fn default() -> Self {
-        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None }
+        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None, own: Own::new() }
     }
 }
 
@@ -456,4 +518,68 @@ pub fn write_safely(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::rename(&temporary, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// a game's own resolution shows over every game's, and stays the game's
+    /// when saved, every game's left as it was.
+    #[test]
+    fn a_games_own_setting_stays_its_own() {
+        let shared = Settings { resolution: 1.5, ..Settings::default() };
+        let mut own = Own::new();
+        own.insert("resolution".into(), toml::Value::Float(2.5));
+        let mut shown = shared.with_own(&own);
+        assert_eq!(shown.resolution, 2.5);
+        shown.resolution = 3.0;
+        shown.smooth = !shared.smooth;
+        let saved = shown.split(&shared, &mut own);
+        assert_eq!(saved.resolution, 1.5);
+        assert_eq!(saved.smooth, !shared.smooth, "a setting the game does not keep goes to every game");
+        assert_eq!(own["resolution"], toml::Value::Float(3.0));
+    }
+
+    #[test]
+    fn making_a_setting_own_and_back() {
+        let mut shared = Settings::default();
+        let mut own = Own::new();
+        let mut shown = shared.with_own(&own);
+        shown.aspect = Aspect::Crop;
+        shown.make_own(&mut shared, &mut own, &["aspect"], true);
+        assert_eq!((shown.aspect, shared.aspect), (Aspect::Crop, Aspect::Crop), "what it was set to before is every game's too");
+        shown.aspect = Aspect::Stretch;
+        shared = shown.split(&shared, &mut own);
+        assert_eq!((shown.aspect, shared.aspect), (Aspect::Stretch, Aspect::Crop));
+        shown.make_own(&mut shared, &mut own, &["aspect"], false);
+        assert_eq!(shown.aspect, Aspect::Crop, "back to every game's");
+        assert!(own.is_empty());
+    }
+
+    /// an own value of the wrong kind, or of no setting, is left out rather
+    /// than losing the rest.
+    #[test]
+    fn a_wrong_own_value_is_left_out() {
+        let shared = Settings::default();
+        let mut own = Own::new();
+        own.insert("resolution".into(), toml::Value::String("sharp".into()));
+        own.insert("nothing".into(), toml::Value::Boolean(true));
+        own.insert("smooth".into(), toml::Value::Boolean(!shared.smooth));
+        let shown = shared.with_own(&own);
+        assert_eq!((shown.resolution, shown.smooth), (shared.resolution, !shared.smooth));
+    }
+
+    /// a game's file keeps its own settings as a table of their own.
+    #[test]
+    fn own_settings_go_into_the_games_file() {
+        let mut game = GameSettings::default();
+        game.own.insert("layout".into(), toml::Value::String("TopOnly".into()));
+        game.own.insert("resolution".into(), toml::Value::Float(2.0));
+        let text = toml::to_string(&game).unwrap();
+        assert!(text.contains("[own]"), "{text}");
+        assert_eq!(toml::from_str::<GameSettings>(&text).unwrap(), game);
+        let old: GameSettings = toml::from_str("language = 1\nregion = 1\n\n[options]\n").unwrap();
+        assert!(old.own.is_empty());
+    }
 }

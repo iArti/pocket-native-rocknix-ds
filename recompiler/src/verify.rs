@@ -509,6 +509,9 @@ pub fn verify(name: &str, pristine: &Memory, library: &Library, functions: &[u32
             fpscr: &mut b.cpu.vfp.fpscr,
             host: &HOST,
             user: &mut b as *mut Run as *mut c_void,
+            fastmem: null_mut(),
+            stack_floor: 0,
+            found: std::ptr::null(),
         };
         store(&cpu, &mut ctx);
 

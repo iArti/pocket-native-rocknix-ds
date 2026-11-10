@@ -31,11 +31,12 @@ pub struct Library {
     found: Box<[Found]>,
 }
 
-/// a slot of Library::found, an address and the code found for it.
-type Found = Cell<(u32, Option<Code>)>;
+/// a slot of Library::found, an address and the code found for it, laid
+/// out for pinned code to read.
+type Found = Cell<recomp_abi::Found>;
 
 /// slots of Library::found, a power of two.
-const FOUND: usize = 1 << 16;
+const FOUND: usize = recomp_abi::FOUND;
 
 /// why a run of recompiled code ended.
 pub enum Stop {
@@ -167,7 +168,7 @@ impl Library {
 
     /// every slot of found empty, an address no code starts at in each.
     fn nothing_found() -> Box<[Found]> {
-        (0..FOUND).map(|_| Cell::new((u32::MAX, None))).collect()
+        (0..FOUND).map(|_| Cell::new(recomp_abi::Found { address: u32::MAX, code: None })).collect()
     }
 
     /// how many instructions the code has handed to the interpreter.
@@ -187,10 +188,10 @@ impl Library {
         // instruction set
         let slot = &self.found[(address as usize >> 1) & (FOUND - 1)];
         match slot.get() {
-            (seen, code) if seen == address => code,
+            found if found.address == address => found.code,
             _ => {
                 let code = self.code.lookup(address);
-                slot.set((address, code));
+                slot.set(recomp_abi::Found { address, code });
                 code
             }
         }
@@ -240,6 +241,9 @@ impl Library {
             host: &HOST,
             user: std::ptr::null_mut(),
             fastmem: memory.fastmem(),
+            stack_floor: 0,
+            // a Cell is laid out as what it holds
+            found: self.found.as_ptr() as *const recomp_abi::Found,
         };
         store(cpu, &mut ctx);
         let mut machine = Machine { cpu, memory, library: self, pending: None };
@@ -259,8 +263,14 @@ impl Library {
             ctx.exit = 0;
             ctx.depth = 0;
             // SAFETY: the code came from the library and ctx is set up the
-            // way it expects, with user pointing at machine
-            unsafe { code(&mut ctx) };
+            // way it expects, with user pointing at machine. Pinned code
+            // runs through the library's own way in
+            unsafe {
+                match self.code.enter() {
+                    Some(enter) => enter(&mut ctx, code),
+                    None => code(&mut ctx),
+                }
+            }
             if let Some(exit) = machine.pending.take() {
                 break Stop::Exit(exit);
             }
@@ -272,7 +282,10 @@ impl Library {
         };
 
         load(&ctx, machine.cpu);
-        let ran = budget.saturating_sub(ctx.budget.max(0) as u64);
+        // pinned code runs a block whole on what budget there is, which
+        // can leave less than none
+        let given = budget.min(i32::MAX as u64) as i64;
+        let ran = (given - ctx.budget as i64).max(0) as u64;
         // the interpreter counted the instructions it ran for the code, which
         // the budget already has
         machine.cpu.cycles = cycles + ran;

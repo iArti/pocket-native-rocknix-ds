@@ -255,7 +255,7 @@ fn data_processing(out: &mut String, scope: &Scope, a: u32, op: u32) -> bool {
     } else if rd == 15 {
         // mov pc, lr returns, any other write to pc jumps
         if opcode == 13 && op & 0x0200_0FFF == 14 {
-            emit!(out, "    ctx->r[15] = r & ~3u; return;");
+            emit!(out, "    RETURN_ARM(r);");
         } else {
             emit!(out, "    target = r & ~3u; goto dispatch;");
         }
@@ -587,8 +587,7 @@ fn branch_exchange(out: &mut String, scope: &Scope, a: u32, op: u32) -> bool {
             reg(scope, rm, a + 8),
             scope.at(next)
         );
-        emit!(out, "    CALL(recomp_call);");
-        emit!(out, "    RETURNED({});", scope.at(next));
+        emit!(out, "    CALL_ELSEWHERE({});", scope.at(next));
         return true;
     }
     if rm == 14 {

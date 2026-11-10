@@ -13,6 +13,13 @@ pub const HEADER: &str = include_str!("../recomp.h");
 /// the interface version, which code has to match to be run.
 pub const ABI: u32 = 5;
 
+/// the version of code built with RECOMP_PINNED, which keeps the guest's
+/// registers in the host's and is run through its recomp_enter alone.
+pub const ABI_PINNED: u32 = 6;
+
+/// recomp_enter, which runs pinned code from the context's r15.
+pub type Enter = unsafe extern "C" fn(*mut Context, Code);
+
 /// why the code gave control back.
 pub const EXIT_NONE: u32 = 0;
 pub const EXIT_SVC: u32 = 1;
@@ -83,7 +90,24 @@ pub struct Context {
     pub host: *const Host,
     pub user: *mut c_void,
     pub fastmem: *mut u8,
+    /// pinned code's, which recomp_enter sets.
+    pub stack_floor: usize,
+    /// the code found for addresses lately, FOUND slots, which pinned code
+    /// looks in before it asks the host.
+    pub found: *const Found,
 }
+
+/// a slot of Context::found, an address and the code found for it, none
+/// where there is none.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Found {
+    pub address: u32,
+    pub code: Option<Code>,
+}
+
+/// slots of Context::found, a power of two, the header's RECOMP_FOUND.
+pub const FOUND: usize = 1 << 16;
 
 #[repr(C)]
 pub struct Entry {
@@ -162,6 +186,8 @@ pub struct Library {
     placed: Vec<(u32, u32, usize)>,
     /// built with RECOMP_FASTMEM, so the host has to give it Context::fastmem.
     fastmem: bool,
+    /// pinned code's way in, none for code that is called as it is.
+    enter: Option<Enter>,
     /// the library the tables are in, none when they are linked in.
     #[cfg(feature = "load")]
     _library: Option<libloading::Library>,
@@ -189,7 +215,8 @@ impl Library {
                 modules: symbol(b"recomp_modules")?,
                 module_count: *(symbol(b"recomp_module_count")? as *const u32),
             };
-            let mut code = Library::linked(&linked)?;
+            let enter = library.get::<Enter>(b"recomp_enter").map(|s| *s).ok();
+            let mut code = Library::from_tables(&linked, enter)?;
             code.fastmem = symbol(b"recomp_fastmem").is_ok();
             code._library = Some(library);
             Ok(code)
@@ -202,9 +229,19 @@ impl Library {
         self.fastmem
     }
 
+    /// pinned code's recomp_enter, which then is the only way to run it.
+    pub fn enter(&self) -> Option<Enter> {
+        self.enter
+    }
+
     /// the code linked into the program.
     pub fn linked(linked: &Linked) -> Result<Library, String> {
-        if linked.abi != ABI {
+        Library::from_tables(linked, None)
+    }
+
+    fn from_tables(linked: &Linked, enter: Option<Enter>) -> Result<Library, String> {
+        // pinned code with its recomp_enter, any other without
+        if !matches!((linked.abi, enter.is_some()), (ABI, false) | (ABI_PINNED, true)) {
             return Err(format!("it was built for version {} of the interface, this is {ABI}", linked.abi));
         }
         Ok(Library {
@@ -214,6 +251,7 @@ impl Library {
             module_count: linked.module_count as usize,
             placed: Vec::new(),
             fastmem: false,
+            enter,
             #[cfg(feature = "load")]
             _library: None,
         })
@@ -288,7 +326,10 @@ int main(void) {
     AT(Context, budget); AT(Context, exit); AT(Context, svc); AT(Context, depth);
     AT(Context, exclusive_address); AT(Context, tls); AT(Context, read_pages);
     AT(Context, write_pages); AT(Context, vfp); AT(Context, fpscr); AT(Context, host);
-    AT(Context, user);
+    AT(Context, user); AT(Context, fastmem); AT(Context, stack_floor); AT(Context, found);
+    SIZE(Found);
+    AT(Found, address); AT(Found, code);
+    printf("RECOMP_FOUND %d\n", RECOMP_FOUND);
     SIZE(Host);
     AT(Host, read8); AT(Host, read16); AT(Host, read32); AT(Host, write8);
     AT(Host, write16); AT(Host, write32); AT(Host, interpret); AT(Host, lookup);
@@ -338,7 +379,9 @@ int main(void) {
 
         let mut lines = Vec::new();
         at!(lines, Context, r, n, z, c, v, q, thumb, ge, exclusive, budget, exit, svc, depth, exclusive_address, tls,
-            read_pages, write_pages, vfp, fpscr, host, user);
+            read_pages, write_pages, vfp, fpscr, host, user, fastmem, stack_floor, found);
+        at!(lines, Found, address, code);
+        lines.push(format!("RECOMP_FOUND {FOUND}"));
         at!(lines, Host, read8, read16, read32, write8, write16, write32, interpret, lookup);
         at!(lines, Entry, address, code);
         at!(lines, Module, name, base, size, count, entries);

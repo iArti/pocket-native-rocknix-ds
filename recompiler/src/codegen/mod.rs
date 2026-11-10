@@ -61,16 +61,14 @@ macro_rules! emit {
 fn call(out: &mut String, scope: &Scope, link: u32, target: u32, thumb: bool) -> bool {
     let caller_thumb = link & 1 != 0;
     let lr = if caller_thumb { format!("{} | 1", scope.at(link & !1)) } else { scope.at(link) };
-    emit!(out, "    ctx->r[14] = {lr}; ctx->r[15] = {};", scope.at(target));
+    emit!(out, "    ctx->r[14] = {lr};");
     if thumb != caller_thumb {
         emit!(out, "    ctx->thumb = {};", thumb as u8);
     }
     match scope.function(target, thumb) {
-        Some(name) => emit!(out, "    CALL({name});"),
-        None => emit!(out, "    CALL(recomp_call);"),
+        Some(name) => emit!(out, "    CALL_TO({name}, {}, {lr});", scope.at(target)),
+        None => emit!(out, "    ctx->r[15] = {}; CALL_ELSEWHERE({lr});", scope.at(target)),
     }
-    let check = if caller_thumb { "RETURNED_T" } else { "RETURNED" };
-    emit!(out, "    {check}({});", scope.at(link & !1));
     true
 }
 
@@ -80,7 +78,7 @@ fn jump(out: &mut String, scope: &Scope, target: u32, thumb: bool) -> bool {
         emit!(out, "    goto L_{target:08X};");
     } else if let Some(name) = scope.function(target, thumb) {
         // a tail call
-        emit!(out, "    ctx->r[15] = {}; CALL({name}); return;", scope.at(target));
+        emit!(out, "    TAIL_TO({name}, {});", scope.at(target));
     } else {
         emit!(out, "    target = {}; goto dispatch;", scope.at(target));
     }
@@ -160,7 +158,9 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
     // the headers the file being written includes
     let mut included = BTreeSet::new();
     let mut size = 0;
-    let mut tables = String::from("#include \"recomp.h\"\n");
+    // RECOMP_TABLES: this file has recomp_enter, which sets the registers
+    // pinned code keeps to itself, so it must not claim them
+    let mut tables = String::from("#define RECOMP_TABLES\n#include \"recomp.h\"\n");
     let mut modules = String::new();
     let mut originals = String::new();
     let mut original_headers = BTreeSet::new();
@@ -201,10 +201,10 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
             emit!(prototypes, "extern uint32_t {prefix}base;");
         }
         for item in &replaced {
-            emit!(prototypes, "void {}(Context *ctx);", item.name);
+            emit!(prototypes, "RECOMP_FN({});", item.name);
         }
         for (&entry, function) in &functions {
-            emit!(prototypes, "void {}(Context *ctx);", name(&prefix, entry, function.mode == Mode::Thumb));
+            emit!(prototypes, "RECOMP_FN({});", name(&prefix, entry, function.mode == Mode::Thumb));
         }
         files.push((header.clone(), prototypes));
 
@@ -213,7 +213,7 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
         let mut resumed: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         for (&entry, function) in &functions {
             if source.is_empty() {
-                source.push_str("#include \"recomp.h\"\n#ifdef RECOMP_FASTMEM\n#undef RECOMP_VIEW\n#define RECOMP_VIEW(ctx) view\n#endif\n");
+                source.push_str("#include \"recomp.h\"\n#if defined(RECOMP_FASTMEM) && !defined(RECOMP_PINNED)\n#undef RECOMP_VIEW\n#define RECOMP_VIEW(ctx) view\n#endif\n");
             }
             if included.insert(index) {
                 source.push_str(&include);
@@ -290,6 +290,7 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
     emit!(tables, "#ifdef RECOMP_FASTMEM\nRECOMP_EXPORT const uint32_t recomp_fastmem = 1;\n#endif");
     emit!(tables, "RECOMP_EXPORT const uint32_t recomp_module_count = {};", units.len() - 1);
     emit!(tables, "RECOMP_EXPORT const Module recomp_modules[] = {{\n{modules}}};");
+    tables.push_str(ENTER);
     files.push(("entries.c".to_owned(), tables));
     if !overrides.is_empty() {
         let mut header = String::from("/* what overrides include, see docs/overrides.md. */\n\n#include \"recomp.h\"\n");
@@ -303,10 +304,100 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
     files
 }
 
+/// recomp_enter, which a host runs pinned code through: it keeps the host's
+/// registers the code takes for the guest's, loads the guest's from the
+/// context, runs the code from r15 and stores them back, with r15 and the
+/// instruction set of where the code returned to when it did not leave by
+/// itself. The stack floor is a megabyte under where the code starts, far
+/// more guest calls than the 2048 unpinned code counts to, far less than a
+/// thread's stack.
+const ENTER: &str = r#"
+#ifdef RECOMP_PINNED
+#include <stddef.h>
+RECOMP_EXPORT void recomp_enter(Context *context, Code code) {
+    register Context *c __asm__("x0") = context;
+    register Code f __asm__("x1") = code;
+    __asm__ volatile(
+        "mov x19, x0\n"
+        "ldr x20, [x19, %[fastmem]]\n"
+        "ldr w21, [x19, %[budget]]\n"
+        "mov x2, sp\n"
+        "sub x2, x2, #0x100, lsl #12\n"
+        "str x2, [x19, %[floor]]\n"
+        "ldp w22, w23, [x19, #0]\n"
+        "ldp w24, w25, [x19, #8]\n"
+        "ldp w26, w27, [x19, #16]\n"
+        "ldp w28, w9, [x19, #24]\n"
+        "ldp w10, w11, [x19, #32]\n"
+        "ldp w12, w13, [x19, #40]\n"
+        "ldp w14, w15, [x19, #48]\n"
+        "ldr w18, [x19, #56]\n"
+        "mov w0, #1\n"
+        "blr x1\n"
+        "ldr w2, [x19, %[exit]]\n"
+        "cbnz w2, 1f\n"
+        "and w2, w0, #1\n"
+        "strb w2, [x19, %[thumb]]\n"
+        "mov w3, #-4\n"
+        "mov w4, #-2\n"
+        "cmp w2, #0\n"
+        "csel w3, w4, w3, ne\n"
+        "and w0, w0, w3\n"
+        "str w0, [x19, #60]\n"
+        "1:\n"
+        "stp w22, w23, [x19, #0]\n"
+        "stp w24, w25, [x19, #8]\n"
+        "stp w26, w27, [x19, #16]\n"
+        "stp w28, w9, [x19, #24]\n"
+        "stp w10, w11, [x19, #32]\n"
+        "stp w12, w13, [x19, #40]\n"
+        "stp w14, w15, [x19, #48]\n"
+        "str w18, [x19, #56]\n"
+        "str w21, [x19, %[budget]]\n"
+        : "+r"(c), "+r"(f)
+        : [fastmem] "i"(offsetof(Context, fastmem)), [budget] "i"(offsetof(Context, budget)),
+          [floor] "i"(offsetof(Context, stack_floor)), [exit] "i"(offsetof(Context, exit)),
+          [thumb] "i"(offsetof(Context, thumb))
+        : "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
+          "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x30",
+          "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23",
+          "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "cc", "memory");
+}
+#endif
+"#;
+
+/// the body with r0 to r14 named by the R macros, which are the context's
+/// registers, or the host's own in pinned code. r15 stays the context's.
+fn registers_by_name(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find("ctx->r[") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 7..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        match after[..digits].parse::<u32>() {
+            Ok(register) if register < 15 && after[digits..].starts_with(']') => {
+                write!(out, "R{register}").unwrap();
+                rest = &after[digits + 1..];
+            }
+            _ => {
+                out.push_str("ctx->r[");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn write_function(out: &mut String, program: &Program, scope: &Scope, entry: u32, function: &Function) {
     let mut body = String::new();
     write_body(&mut body, program, scope, entry, function);
-    let head = format!("void {}(Context *ctx) {{\n    uint8_t *const view = ctx->fastmem;\n", name(scope.prefix, entry, function.mode == Mode::Thumb));
+    let body = registers_by_name(&body);
+    // the function's instruction set, which a return compares where it
+    // goes with
+    emit!(out, "#undef RECOMP_THUMB\n#define RECOMP_THUMB {}", (function.mode == Mode::Thumb) as u8);
+    let head = format!("RECOMP_FN({}) {{\n    RECOMP_HEAD\n", name(scope.prefix, entry, function.mode == Mode::Thumb));
     match flags_in_locals(&body) {
         Some(body) => {
             out.push_str("#undef RECOMP_SYNC_OUT\n#undef RECOMP_SYNC_IN\n");
@@ -361,8 +452,34 @@ fn write_body(out: &mut String, program: &Program, scope: &Scope, entry: u32, fu
     if scope.relative {
         emit!(out, "    const uint32_t module_base = {}base;", scope.prefix);
     }
-    emit!(out, "    uint32_t target = ctx->r[15];");
-    emit!(out, "    if (LIKELY(target == {} && {state})) goto L_{entry:08X};", scope.at(entry));
+    // the instructions first, to know whether the function calls others
+    let mut code = String::new();
+    let instructions = &function.instructions;
+    for (i, &address) in instructions.iter().enumerate() {
+        if function.labels.contains(&address) {
+            let run = instructions[i + 1..].iter().take_while(|a| !function.labels.contains(a)).count() + 1;
+            emit!(code, "L_{address:08X}:");
+            emit!(code, "    BUDGET({}, {run});", scope.at(address));
+        }
+        let (continues, size) = if thumb {
+            let op = program.text.read16(address).unwrap_or(0) as u32;
+            let second = program.text.read16(address + 2).unwrap_or(0) as u32;
+            let size = crate::thumb::decode(op as u16, Some(second as u16), address).1;
+            emit!(code, "    /* {address:08X} {op:04X} */");
+            (thumb::lower(&mut code, scope, address, op, second), size)
+        } else {
+            let op = program.text.read32(address).unwrap_or(0);
+            emit!(code, "    /* {address:08X} {op:08X} */");
+            (arm::lower(&mut code, scope, address, op), 4)
+        };
+        let next = address + size;
+        if continues && instructions.get(i + 1) != Some(&next) {
+            emit!(code, "    target = {}; goto dispatch;", scope.at(next));
+        }
+    }
+    let calls = ["CALL_TO(", "CALL_ELSEWHERE(", "TAIL_TO("].iter().any(|call| code.contains(call));
+    let enter = if calls { "RECOMP_ENTRY_CALLS" } else { "RECOMP_ENTRY" };
+    emit!(out, "    {enter}({}, L_{entry:08X}, {state})", scope.at(entry));
     emit!(out, "dispatch:");
     let offset = if scope.relative { "target - module_base" } else { "target" };
     emit!(out, "    if ({state}) switch ({offset}) {{");
@@ -371,33 +488,8 @@ fn write_body(out: &mut String, program: &Program, scope: &Scope, entry: u32, fu
     }
     emit!(out, "    }}");
     // somewhere else, the host knows where
-    emit!(out, "    ctx->r[15] = target;");
-    emit!(out, "    CALL(recomp_call);");
-    emit!(out, "    return;");
-
-    let instructions = &function.instructions;
-    for (i, &address) in instructions.iter().enumerate() {
-        if function.labels.contains(&address) {
-            let run = instructions[i + 1..].iter().take_while(|a| !function.labels.contains(a)).count() + 1;
-            emit!(out, "L_{address:08X}:");
-            emit!(out, "    BUDGET({}, {run});", scope.at(address));
-        }
-        let (continues, size) = if thumb {
-            let op = program.text.read16(address).unwrap_or(0) as u32;
-            let second = program.text.read16(address + 2).unwrap_or(0) as u32;
-            let size = crate::thumb::decode(op as u16, Some(second as u16), address).1;
-            emit!(out, "    /* {address:08X} {op:04X} */");
-            (thumb::lower(out, scope, address, op, second), size)
-        } else {
-            let op = program.text.read32(address).unwrap_or(0);
-            emit!(out, "    /* {address:08X} {op:08X} */");
-            (arm::lower(out, scope, address, op), 4)
-        };
-        let next = address + size;
-        if continues && instructions.get(i + 1) != Some(&next) {
-            emit!(out, "    target = {}; goto dispatch;", scope.at(next));
-        }
-    }
+    emit!(out, "    TAIL_ELSEWHERE(target);");
+    out.push_str(&code);
     emit!(out, "}}\n");
 }
 
@@ -433,8 +525,8 @@ mod tests {
         };
         let files = generated(std::slice::from_ref(&replaced));
         let code = &files["code000.c"];
-        assert!(code.contains("CALL(override_0x00100008);"));
-        assert!(files["functions.h"].contains("void override_0x00100008(Context *ctx);"));
+        assert!(code.contains("CALL_TO(override_0x00100008, 0x00100008u, 0x00100004u);"));
+        assert!(files["functions.h"].contains("RECOMP_FN(override_0x00100008);"));
         assert!(files["entries.c"].contains("{0x00100008u, override_0x00100008},"));
         let header = &files["overrides.h"];
         assert!(header.contains("static inline void original_0x00100008(Context *ctx) {"));
@@ -442,7 +534,7 @@ mod tests {
 
         // without overrides nothing changes
         let plain = generated(&[]);
-        assert!(plain["code000.c"].contains("CALL(f_00100008);"));
+        assert!(plain["code000.c"].contains("CALL_TO(f_00100008, 0x00100008u, 0x00100004u);"));
         assert!(!plain.contains_key("overrides.h"));
     }
 }

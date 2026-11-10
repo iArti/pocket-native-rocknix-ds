@@ -195,7 +195,7 @@ fn high_register(out: &mut String, scope: &Scope, a: u32, op: u32) -> bool {
             true
         }
         2 if rd == 15 && rs == 14 => {
-            emit!(out, "    ctx->r[15] = ctx->r[14] & ~1u; return;");
+            emit!(out, "    RETURN_THUMB(ctx->r[14]);");
             false
         }
         2 if rd == 15 => {
@@ -213,8 +213,7 @@ fn high_register(out: &mut String, scope: &Scope, a: u32, op: u32) -> bool {
                 "    {{ uint32_t v = {source}; ctx->r[14] = {} | 1; ctx->thumb = v & 1; ctx->r[15] = v & (ctx->thumb ? ~1u : ~3u); }}",
                 scope.at(next)
             );
-            emit!(out, "    CALL(recomp_call);");
-            emit!(out, "    RETURNED_T({});", scope.at(next));
+            emit!(out, "    CALL_ELSEWHERE({} | 1);", scope.at(next));
             true
         }
         _ if rs == 14 => {

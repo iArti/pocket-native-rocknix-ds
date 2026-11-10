@@ -64,7 +64,10 @@ if [ -s "/out/Pocket Native/pocket-native/games/$id/title.hints" ]; then
 fi
 overrides=()
 [ -d "titles/$id/overrides" ] && overrides=(--overrides "titles/$id/overrides")
-RECOMP_CFLAGS=-DRECOMP_FASTMEM CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/release/3dsrecomp" build "$game" "/work/recomp/$id" "${overrides[@]}"
+# RECOMP_PINNED keeps the guest's registers in the handheld's own, which its
+# in-order cores run a good deal faster. POCKET_NATIVE_RECOMP_CFLAGS says
+# otherwise, -DRECOMP_FASTMEM alone for the code every version before ran
+RECOMP_CFLAGS="${POCKET_NATIVE_RECOMP_CFLAGS:--DRECOMP_FASTMEM -DRECOMP_PINNED -mtune=cortex-a55}" CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/release/3dsrecomp" build "$game" "/work/recomp/$id" "${overrides[@]}"
 
 if [ ! -f /work/shared_font.bin ]; then
     echo "== making the system font"

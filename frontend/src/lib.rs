@@ -275,6 +275,7 @@ pub fn run(mut args: Vec<String>) {
     let (mut counted, mut rendered, mut since) = (0u32, 0u32, Instant::now());
     let mut busy = busy::Busy::start();
     let mut logs = 0u32;
+    let mut cpu_stats = (0u64, 0f64, 0u64);
     // ZAKURO_SLOW_FRAMES=ms logs every frame that took longer to run
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
     loop {
@@ -557,6 +558,24 @@ pub fn run(mut args: Vec<String>) {
                 shown - counted_shown,
                 busy.report()
             );
+            // ZAKURO_CPU_STATS: what the game's code costs this thread, for
+            // telling one build of a game's recompiled code from another
+            if std::env::var_os("ZAKURO_CPU_STATS").is_some() {
+                let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                // SAFETY: time is this function's to fill
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+                let spent = time.tv_sec as f64 + time.tv_nsec as f64 / 1e9;
+                let ran = system.recompiled_instructions + system.interpreted_instructions;
+                let (instructions, seconds) = (ran - cpu_stats.0, spent - cpu_stats.1);
+                log::info!(
+                    "cpu: {:.1} M instructions in {:.2} s of this thread, {:.2} ns each, {} interpreted",
+                    instructions as f64 / 1e6,
+                    seconds,
+                    seconds * 1e9 / instructions.max(1) as f64,
+                    system.interpreted_instructions - cpu_stats.2
+                );
+                cpu_stats = (ran, spent, system.interpreted_instructions);
+            }
             (counted_transfers, counted_top, counted_bottom, counted_shown) = (transfers, top, bottom, shown);
             (counted, rendered, since) = (0, 0, Instant::now());
             logs += 1;
